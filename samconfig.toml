@@ -1,0 +1,12 @@
+# SAM deploy configuration — avoids interactive prompts on deploy.
+# Region should match where you enabled Bedrock model access (us-east-1 or us-west-2).
+
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "threshold"
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true  # First deploy: review the changeset before confirming. Switch to false after known-good.
+# Set your region here — must match aws configure default region
+# region = "us-east-1"

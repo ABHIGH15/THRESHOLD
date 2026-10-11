@@ -1,0 +1,24 @@
+# Secrets and Credentials
+.env
+.env.local
+.env.*
+secrets.json
+*.pem
+*.key
+credentials.json
+# AWS SAM local
+.aws-sam/
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# SQLite
+*.db
+*.db-journal
+
+# Evidence (real API responses — git-ignored; only redacted samples under docs/ring_samples/ are committed)
+evidence/
+
+# Python virtual environment
+.venv/
