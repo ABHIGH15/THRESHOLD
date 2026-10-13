@@ -471,6 +471,309 @@ Content-Length: 82
 1
 ```
 
+### [2026-10-13T13:40:00Z] Step 0 — Verbatim Ring Docs Excerpts & Evidence Verification
+
+#### 1. Verbatim Allowed `sub_type` Values from Official Docs
+Source file: `content.md` lines 7227–7277:
+```html
+7227: <p>The values <code>sub_type</code> can carry depend on whether the device has <strong>Smart Alerts</strong> enabled. Smart Alerts is the Ring-side detection that classifies what triggered a motion event; customers turn it on per device in the Ring app.</p>
+7228: 
+7229: <p><strong>Smart Alerts disabled.</strong> No classification is performed, and every motion event from the device carries one value:</p>
+7230: 
+7231: <table>
+7232:   <thead>
+7233:     <tr>
+7234:       <th>Sub Type</th>
+7235:       <th>Description</th>
+7236:     </tr>
+7237:   </thead>
+7238:   <tbody>
+7239:     <tr>
+7240:       <td>motion</td>
+7241:       <td>General motion detected</td>
+7242:     </tr>
+7243:   </tbody>
+7244: </table>
+7245: 
+7246: <p><strong>Smart Alerts enabled.</strong> Ring classifies the trigger, and <code>sub_type</code> carries one of:</p>
+7247: 
+7248: <table>
+7249:   <thead>
+7250:     <tr>
+7251:       <th>Sub Type</th>
+7252:       <th>Description</th>
+7253:     </tr>
+7254:   </thead>
+7255:   <tbody>
+7256:     <tr>
+7257:       <td>human</td>
+7258:       <td>Human detected</td>
+7259:     </tr>
+7260:     <tr>
+7261:       <td>vehicle</td>
+7262:       <td>Vehicle detected</td>
+7263:     </tr>
+7264:     <tr>
+7265:       <td>package_delivery</td>
+7266:       <td>Package delivery detected</td>
+7267:     </tr>
+7268:     <tr>
+7269:       <td>other_motion</td>
+7270:       <td>Unable to categorize motion</td>
+7271:     </tr>
+7272:   </tbody>
+7273: </table>
+7274: 
+7275: <div class="alert alert-danger" role="alert"><i class="fa fa-exclamation-triangle"></i> <b>Important:</b> <code>sub_type</code> is returned <strong>inside</strong> <code>attributes</code> — read it as <code>data.attributes.sub_type</code>, not <code>data.subType</code>.</div>
+7276: 
+7277: <div class="alert alert-info" role="alert"><i class="fa fa-info-circle"></i> <b>Note:</b> No API exposes whether Smart Alerts is enabled on a device, so your app cannot check the setting before deciding how to read <code>sub_type</code>. Treat the field as an open-ended vocabulary: handle the values you act on, and pass anything else through rather than dropping it. See <a href="ux-design-guide.html#refer-to-ring-app-for-device-configuration-settings">Refer to Ring app for device configuration settings</a>.</div>
+```
+
+**Verification:** The docs DO explicitly list `vehicle` and `package_delivery` alongside `human`, `motion`, and `other_motion`.
+
+#### 2. Verbatim Image Snapshots Section from Official Docs
+Source file: `content.md` lines 11431–11581, 11633–11656, 11707–11760:
+```html
+11431: <h2 id="image-snapshots">Image Snapshots</h2>
+11432: 
+11433: <p>Ring provides an endpoint to download image snapshots in JPEG or PNG formats by a specified timestamp of the last snapshot in a time range.</p>
+11434: 
+11435: <h3 id="overview-9">Overview</h3>
+11436: 
+11437: <ul>
+11438:   <li><strong>JPEG / PNG</strong>: The download can be in JPEG or PNG format as specified in the <code>image_options.format</code></li>
+11439:   <li><strong>Image Resolution</strong>: Image width and height as specified (optional) in <code>image_options.resolution.width</code> and <code>image_options.resolution.height</code></li>
+11440:   <li><strong>Snapshot Type</strong>: The sanpshot at the specified timestamp or the last snapshot in a timestamp range</li>
+11441: </ul>
+11442: 
+11443: <h3 id="download-flow">Download Flow</h3>
+11444: 
+11445: <p>Image downloads follow a <strong>two-step flow</strong>:</p>
+11446: 
+11447: <ol>
+11448:   <li><strong>POST</strong> to the media endpoint with your request parameters → returns a <code>303 See Other</code> redirect with a pre-signed <code>Location</code> URL</li>
+11449:   <li><strong>GET</strong> the pre-signed URL from the <code>Location</code> header → returns the binary media content</li>
+11450: </ol>
+...
+11499: <table>
+11500:   <thead>
+11501:     <tr>
+11502:       <th>Field</th>
+11503:       <th>Type</th>
+11504:       <th>Required</th>
+11505:       <th>Description</th>
+11506:       <th>Constraints</th>
+11507:     </tr>
+11508:   </thead>
+11509:   <tbody>
+11510:     <tr>
+11511:       <td><code>type</code></td>
+11512:       <td>string</td>
+11513:       <td>Yes</td>
+11514:       <td>Search mode</td>
+11515:       <td><code>"at_timestamp"</code> or <code>"latest_in_range"</code></td>
+11516:     </tr>
+11517:     <tr>
+11518:       <td><code>timestamp</code></td>
+11519:       <td>integer</td>
+11520:       <td>For <code>at_timestamp</code></td>
+11521:       <td>Target time in epoch milliseconds</td>
+11522:       <td>Within last 180 days, ≤ now</td>
+11523:     </tr>
+11524:     <tr>
+11525:       <td><code>start_timestamp</code></td>
+11526:       <td>integer</td>
+11527:       <td>For <code>latest_in_range</code></td>
+11528:       <td>Window start in epoch milliseconds</td>
+11529:       <td>Within last 180 days, ≤ now</td>
+11530:     </tr>
+11531:     <tr>
+11532:       <td><code>end_timestamp</code></td>
+11533:       <td>integer</td>
+11534:       <td>No</td>
+11535:       <td>Window end in epoch milliseconds</td>
+11536:       <td>Defaults to now. Window ≤ 24 hours</td>
+11537:     </tr>
+11538:     <tr>
+11539:       <td><code>image_options</code></td>
+11540:       <td>object</td>
+11541:       <td>No</td>
+11542:       <td>Image format options</td>
+11543:       <td>&nbsp;</td>
+11544:     </tr>
+11545:     <tr>
+11546:       <td><code>image_options.format</code></td>
+11547:       <td>string</td>
+11548:       <td>No</td>
+11549:       <td>Output format</td>
+11550:       <td><code>"jpeg"</code> or <code>"png"</code></td>
+11551:     </tr>
+11552:     <tr>
+11553:       <td><code>image_options.resolution.width</code></td>
+11554:       <td>integer</td>
+11555:       <td>No</td>
+11556:       <td>Width in pixels.</td>
+11557:       <td>1–1920</td>
+11558:     </tr>
+11559:     <tr>
+11560:       <td><code>image_options.resolution.height</code></td>
+11561:       <td>integer</td>
+11562:       <td>No</td>
+11563:       <td>Height in pixels.</td>
+11564:       <td>1–1080</td>
+11565:     </tr>
+11566:     <tr>
+11567:       <td><code>components</code></td>
+11568:       <td>array</td>
+11569:       <td>No</td>
+11570:       <td>Camera module to capture from. Required for a predictable result on a multi-camera device.</td>
+11571:       <td>Exactly one object — multiple modules per request are not allowed</td>
+11572:     </tr>
+11573:     <tr>
+11574:       <td><code>components[].component_id</code></td>
+11575:       <td>string</td>
+11576:       <td>With <code>components</code></td>
+11577:       <td>Camera module identifier from <code>components.items[]</code> in capabilities</td>
+11578:       <td>String, not an integer</td>
+11579:     </tr>
+11580:   </tbody>
+11581: </table>
+...
+11633: <h5 id="redirect-response">Redirect Response</h5>
+11634: 
+11635: <div class="language-http highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">HTTP</span><span class="o">/</span><span class="m">1.1</span> <span class="m">303</span> <span class="ne">See Other</span>
+11636: <span class="na">Location</span><span class="p">:</span> <span class="s">https://download-{region}.{domain}/v1/download?security_token=...&amp;req_type=image_download&amp;req_id=...&amp;X-Amz-Date=...&amp;X-Amz-Expires=...</span>
+11637: <span class="na">X-Request-ID</span><span class="p">:</span> <span class="s">&lt;request_id&gt;</span>
+11638: </code></pre></div></div>
+...
+11707: <table>
+11708:   <thead>
+11709:     <tr>
+11710:       <th>HTTP Status</th>
+11711:       <th>Code</th>
+11712:       <th>Detail</th>
+11713:       <th>When</th>
+11714:     </tr>
+11715:   </thead>
+11716:   <tbody>
+11717:     <tr>
+11718:       <td>400</td>
+11719:       <td><code>INVALID_PAYLOAD</code></td>
+11720:       <td>Validation message</td>
+11721:       <td>Invalid or missing request parameters</td>
+11722:     </tr>
+11723:     <tr>
+11724:       <td>401</td>
+11725:       <td><code>UNAUTHORIZED</code></td>
+11726:       <td>Authentication credentials are missing or invalid</td>
+11727:       <td>Bad or expired token</td>
+11728:     </tr>
+11729:     <tr>
+11730:       <td>403</td>
+11731:       <td><code>REQUEST_FORBIDDEN</code></td>
+11732:       <td>Client is not authorized for the device</td>
+11733:       <td>No access to device</td>
+11734:     </tr>
+11735:     <tr>
+11736:       <td>404</td>
+11737:       <td><code>DEVICE_NOT_FOUND</code></td>
+11738:       <td>Unknown device provided: {id}</td>
+11739:       <td>Invalid device ID</td>
+11740:     </tr>
+11741:     <tr>
+11742:       <td>416</td>
+11743:       <td><code>MEDIA_NOT_FOUND</code></td>
+11744:       <td>No media found in time range</td>
+11745:       <td>No recordings exist for the requested time</td>
+11746:     </tr>
+11747:     <tr>
+11748:       <td>422</td>
+11749:       <td><code>CORRUPT_RECORDING</code></td>
+11750:       <td>Provided timestamp is within a corrupt recording</td>
+11751:       <td>Damaged recording data</td>
+11752:     </tr>
+11753:     <tr>
+11754:       <td>425</td>
+11755:       <td><code>RECORDING_NOT_READY</code></td>
+11756:       <td>The request was made before any recording was available</td>
+11757:       <td>Recording not yet available</td>
+11758:     </tr>
+11759:     <tr>
+11760:       <td>500</td>
+11761:       <td><code>INTERNAL_ERROR</code></td>
+11762:       <td>Internal server error</td>
+11763:       <td>Ring service failure</td>
+11764:     </tr>
+11765:   </tbody>
+11766: </table>
+```
+
+### [2026-10-13T13:50:00Z] Task A4 — Scheduler + Absence Engine (COMPLETE)
+
+#### 1. Implementation Architecture (`src/threshold/scheduler.py`)
+- Standard library only: `abc`, `datetime`, `json`, `logging`, `os`, `sqlite3`, `threading`, `time`, `traceback`, `typing`, `zoneinfo`.
+- **Clock Interfaces:**
+  - `Clock` (ABC)
+  - `RealClock`: Returns UTC wall-clock time (`datetime.now(timezone.utc)`).
+  - `FakeClock`: Controllable via `set_time()` and `advance()`.
+  - `AcceleratedClock`: N simulated seconds per 1 real second for demo mode.
+- **Absence Engine (`run_scheduler_tick`):**
+  - Evaluates each routine via existing deterministic `derive_status()` in `status.py`.
+  - `missed` status: creates escalation once per `(routine_id, local_date)` using `INSERT OR IGNORE`.
+  - `unknown` (stale/offline device), `snoozed`, or `observed`: never escalates.
+  - Late event after a miss: status transitions to `observed`, existing escalation row is preserved (no duplicate).
+- **Delivery with Retry:**
+  - `escalations.notified_at` column tracks delivery status (NULL until delivered).
+  - Each tick processes pending unnotified escalations via `Notifier` interface (`RecordingNotifier`).
+  - If notification delivery raises, `notified_at` remains NULL and retries next tick. After delivery, never resends.
+- **Background Scheduler (`Scheduler`):**
+  - Background daemon thread controlled by `threading.Event` (`start()`, `stop()`).
+  - Tick exceptions are caught and logged with full traceback without killing the thread (`last_tick_at`, `last_error`).
+- **Timezone & Window Handling (`src/threshold/status.py`):**
+  - Added support for overnight windows crossing midnight (e.g. 22:00 to 06:00).
+  - Verified across US fall-back DST boundary (2026-11-01), US spring-forward DST boundary (2026-03-08), and non-DST zone (`Asia/Kolkata`).
+
+#### 2. Test Suite Verification (`tests/test_scheduler.py`)
+Ran unit and integration suite:
+1. `test_five_consecutive_ticks_past_miss_exactly_one_escalation_row` -> ok
+2. `test_simulated_restart_on_same_db_still_one_escalation_row` -> ok
+3. `test_stale_device_returns_unknown_and_zero_escalations` -> ok
+4. `test_offline_device_returns_unknown_and_zero_escalations` -> ok
+5. `test_snoozed_routine_returns_zero_escalations` -> ok
+6. `test_late_event_after_miss_status_observed_still_one_escalation` -> ok
+7. `test_notifier_fails_once_retries_and_delivers_once` -> ok
+8. `test_tick_exception_does_not_kill_thread` -> ok
+9. `test_timezone_window_crossing_midnight` -> ok
+10. `test_us_fallback_dst_boundary` -> ok
+11. `test_us_spring_forward_dst_boundary` -> ok
+12. `test_non_dst_zone_asia_kolkata` -> ok
+13. `test_clocks_mechanics` -> ok
+
+**Full Test Suite Run:**
+`python3 -m unittest discover tests -v`
+**86 tests in 6.501s — all passing** (56 baseline + 5 ingest + 12 server + 13 scheduler).
+
+#### 3. Demo Timeline Output (`scripts/demo_ticks.py`)
+```text
+=========================================================================================================
+                    THRESHOLD DETERMINISTIC ABSENCE DETECTION ENGINE — SIMULATED DAY                     
+=========================================================================================================
+| Tick (UTC)   | Local (CDT)  | Routine Status  | Escalations | Notified   | Context Description                    |
+|--------------|--------------|-----------------|-------------|------------|----------------------------------------|
+| 11:45 UTC    | 06:45 CDT    | watching        | 0           | No         | Before window starts (07:00)           |
+| 12:30 UTC    | 07:30 CDT    | watching        | 0           | No         | Inside active window (07:00-09:00)     |
+| 14:15 UTC    | 09:15 CDT    | watching        | 0           | No         | Past window_end, inside 30m delay      |
+| 14:35 UTC    | 09:35 CDT    | missed          | 1           | Yes        | Past deadline (09:30 CDT) -> Miss detected! |
+| 14:45 UTC    | 09:45 CDT    | missed          | 1           | Yes        | Consecutive tick past miss (deduped)   |
+| 15:00 UTC    | 10:00 CDT    | observed        | 1           | Preserved  | Late event arrives satisfying window   |
+=========================================================================================================
+
+=== SQLITE3 ESCALATIONS TABLE AFTER DEMO ===
+rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
+```
+
+
+
 
 
 

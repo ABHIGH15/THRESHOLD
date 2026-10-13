@@ -49,8 +49,18 @@ def _get_today_window(routine: Routine, now: datetime) -> tuple[datetime, dateti
     start_time = _parse_time(routine.window_start)
     end_time = _parse_time(routine.window_end)
 
-    window_start = datetime.combine(local_date, start_time, tzinfo=tz)
-    window_end = datetime.combine(local_date, end_time, tzinfo=tz)
+    if start_time <= end_time:
+        window_start = datetime.combine(local_date, start_time, tzinfo=tz)
+        window_end = datetime.combine(local_date, end_time, tzinfo=tz)
+    else:
+        # Window crosses midnight (e.g. 22:00 to 06:00)
+        # Any time before 22:00 belongs to the window that started yesterday evening
+        if local_now.time() < start_time:
+            window_start = datetime.combine(local_date - timedelta(days=1), start_time, tzinfo=tz)
+            window_end = datetime.combine(local_date, end_time, tzinfo=tz)
+        else:
+            window_start = datetime.combine(local_date, start_time, tzinfo=tz)
+            window_end = datetime.combine(local_date + timedelta(days=1), end_time, tzinfo=tz)
 
     return window_start, window_end
 
@@ -59,7 +69,14 @@ def _is_routine_day(routine: Routine, now: datetime) -> bool:
     """Check if today is a day the routine is active."""
     tz = ZoneInfo(routine.timezone)
     local_now = now.astimezone(tz) if now.tzinfo else now.replace(tzinfo=tz)
-    day_name = DAY_NAMES[local_now.weekday()]
+    start_time = _parse_time(routine.window_start)
+    end_time = _parse_time(routine.window_end)
+    local_date = local_now.date()
+    if start_time > end_time and local_now.time() < start_time:
+        day_date = local_date - timedelta(days=1)
+    else:
+        day_date = local_date
+    day_name = DAY_NAMES[day_date.weekday()]
     return day_name in routine.days
 
 

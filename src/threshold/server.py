@@ -71,14 +71,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
             return
 
         if content_length > MAX_BODY_BYTES:
-            # Drain up to content_length (capped at 2MB) so client doesn't get BrokenPipe before reading 413
-            bytes_to_drain = min(content_length, 2 * 1024 * 1024)
-            while bytes_to_drain > 0:
-                chunk = self.rfile.read(min(bytes_to_drain, 65536))
-                if not chunk:
-                    break
-                bytes_to_drain -= len(chunk)
-
             self.send_response(413)
             self.send_header("Content-Type", "application/json")
             self.send_header("Connection", "close")

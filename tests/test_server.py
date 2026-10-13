@@ -74,26 +74,49 @@ class TestWebhookServer(unittest.TestCase):
 
     def _make_ring_payload(
         self,
-        request_id: str = "req_1",
+        request_id: str = "2ad45ade-1818-4154-813b-afdd8bcd8085",
         device_id: str = "cam_front",
         event_type: str = "motion_detected",
         sub_type: str = "human",
         timestamp_ms: int = 1791814643626,
+        meta_time: str = "2026-02-13T13:39:57.200155525Z",
+        account_id: str = "ava1.ring.account.XXXYYY",
+        use_camel_sub_type: bool = False,
     ) -> bytes:
+        attrs = {
+            "source": device_id,
+            "source_type": "devices",
+            "timestamp": timestamp_ms,
+            "timestamp_readable": "2026-08-14 08:53:16",
+        }
+        if sub_type is not None:
+            if not use_camel_sub_type:
+                attrs["sub_type"] = sub_type
+            attrs["component_ids"] = ["0"]
+
+        data_obj = {
+            "id": f"{device_id}_{event_type}_{timestamp_ms}",
+            "type": event_type,
+            "attributes": attrs,
+            "relationships": {
+                "devices": {
+                    "links": {
+                        "self": f"/v1/devices/{device_id}"
+                    }
+                }
+            },
+        }
+        if use_camel_sub_type and sub_type is not None:
+            data_obj["subType"] = sub_type
+
         payload = {
             "meta": {
+                "version": "1.1",
+                "time": meta_time,
                 "request_id": request_id,
-                "time": timestamp_ms,
+                "account_id": account_id,
             },
-            "data": {
-                "id": f"evt_{request_id}",
-                "type": event_type,
-                "attributes": {
-                    "source": device_id,
-                    "timestamp": timestamp_ms,
-                    "sub_type": sub_type,
-                },
-            },
+            "data": data_obj,
         }
         return json.dumps(payload).encode("utf-8")
 
@@ -171,15 +194,32 @@ class TestWebhookServer(unittest.TestCase):
         self.assertEqual(cur.fetchone()[0], 0)
         conn.close()
 
-    # 6. Body > 1 MB with valid signature -> 413.
+    # 6. Body > 1 MB -> 413 without reading whole body.
     def test_body_too_large_413(self):
-        # 1 MB + 1024 bytes
-        large_body = b'{"data": "' + (b"X" * (1024 * 1024 + 1024)) + b'"}'
-        sig = compute_signature(large_body, self.secret)
-        headers = {"Content-Type": "application/json", "X-Signature": sig}
+        import socket
+        # Connect raw socket and send headers with Content-Length > 1MB (e.g. 2MB)
+        # We only send a few bytes of body; server responds 413 and closes connection WITHOUT reading 2MB.
+        s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        raw_req = (
+            b"POST /webhooks/ring HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: 2097152\r\n"
+            b"X-Signature: sha256=abcdef123456\r\n"
+            b"\r\n"
+            b"head_only_not_2mb"
+        )
+        s.sendall(raw_req)
+        chunks = []
+        while True:
+            data = s.recv(4096)
+            if not data:
+                break
+            chunks.append(data)
+        s.close()
+        resp = b"".join(chunks).decode("utf-8")
 
-        status, data = self._send_request("POST", "/webhooks/ring", large_body, headers)
-        self.assertEqual(status, 413)
+        self.assertIn("413", resp)
 
         conn = get_connection(self.db_path)
         cur = conn.execute("SELECT COUNT(*) FROM events")
@@ -263,6 +303,43 @@ class TestWebhookServer(unittest.TestCase):
 
         conn = get_connection(self.db_path)
         rt = get_routine(conn, "rt_front_porch")
+        self.assertEqual(rt["last_satisfied_at"], "2026-10-12T14:17:23Z")
+        conn.close()
+
+    # 11. Extra: Fallback support for camelCase data.subType
+    def test_camelcase_subtype_fallback(self):
+        conn = get_connection(self.db_path)
+        save_routine(
+            conn,
+            routine_id="rt_camel_routine",
+            property_id="prop_main",
+            name="Camel SubType Routine",
+            device_id="cam_camel",
+            expected_event_type="motion_detected",
+            expected_sub_type="human",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+        )
+        conn.close()
+
+        body = self._make_ring_payload(
+            request_id="req_camel_sub_type",
+            device_id="cam_camel",
+            event_type="motion_detected",
+            sub_type="human",
+            timestamp_ms=1791814643626,
+            use_camel_sub_type=True,
+        )
+        sig = compute_signature(body, self.secret)
+        headers = {"Content-Type": "application/json", "X-Signature": sig}
+
+        status, _ = self._send_request("POST", "/webhooks/ring", body, headers)
+        self.assertEqual(status, 200)
+
+        conn = get_connection(self.db_path)
+        rt = get_routine(conn, "rt_camel_routine")
         self.assertEqual(rt["last_satisfied_at"], "2026-10-12T14:17:23Z")
         conn.close()
 

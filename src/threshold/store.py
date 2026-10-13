@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS escalations (
     local_date TEXT NOT NULL,
     fired_at TEXT NOT NULL,
     acked_at TEXT,
+    notified_at TEXT,
     UNIQUE(routine_id, local_date),
     FOREIGN KEY(routine_id) REFERENCES routines(routine_id)
 );
@@ -131,6 +132,11 @@ def init_db(conn_or_path: Optional[Union[sqlite3.Connection, str]] = None) -> sq
         conn = get_connection(conn_or_path)
 
     conn.executescript(SCHEMA_SQL)
+    # Ensure notified_at column exists for existing escalations tables
+    try:
+        conn.execute("ALTER TABLE escalations ADD COLUMN notified_at TEXT;")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     return conn
 
@@ -313,22 +319,61 @@ def update_routine_last_satisfied(
     conn.commit()
 
 
+def list_routines(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Retrieve all routines from routines table."""
+    cur = conn.execute("SELECT * FROM routines ORDER BY routine_id")
+    return [dict(row) for row in cur.fetchall()]
+
+
 def record_escalation(
     conn: sqlite3.Connection,
     routine_id: str,
     local_date: str,
     fired_at: Union[int, float, str, datetime],
     acked_at: Optional[Union[int, float, str, datetime]] = None,
-) -> None:
+    notified_at: Optional[Union[int, float, str, datetime]] = None,
+    ignore_conflicts: bool = False,
+) -> bool:
     """
     Record an escalation.
-    Raises sqlite3.IntegrityError if (routine_id, local_date) already exists.
+    If ignore_conflicts=True, uses INSERT OR IGNORE and returns True if inserted, False if ignored.
+    If ignore_conflicts=False, uses INSERT and raises sqlite3.IntegrityError if (routine_id, local_date) already exists.
     """
     fired_iso = to_iso_timestamp(fired_at)
     acked_iso = to_iso_timestamp(acked_at) if acked_at is not None else None
-    sql = "INSERT INTO escalations (routine_id, local_date, fired_at, acked_at) VALUES (?, ?, ?, ?)"
-    conn.execute(sql, (routine_id, local_date, fired_iso, acked_iso))
+    notified_iso = to_iso_timestamp(notified_at) if notified_at is not None else None
+
+    if ignore_conflicts:
+        sql = "INSERT OR IGNORE INTO escalations (routine_id, local_date, fired_at, acked_at, notified_at) VALUES (?, ?, ?, ?, ?)"
+        cur = conn.execute(sql, (routine_id, local_date, fired_iso, acked_iso, notified_iso))
+        conn.commit()
+        return cur.rowcount > 0
+    else:
+        sql = "INSERT INTO escalations (routine_id, local_date, fired_at, acked_at, notified_at) VALUES (?, ?, ?, ?, ?)"
+        conn.execute(sql, (routine_id, local_date, fired_iso, acked_iso, notified_iso))
+        conn.commit()
+        return True
+
+
+def mark_escalation_notified(
+    conn: sqlite3.Connection,
+    routine_id: str,
+    local_date: str,
+    notified_at: Union[int, float, str, datetime],
+) -> None:
+    """Mark an escalation as notified."""
+    iso = to_iso_timestamp(notified_at)
+    conn.execute(
+        "UPDATE escalations SET notified_at = ? WHERE routine_id = ? AND local_date = ?",
+        (iso, routine_id, local_date),
+    )
     conn.commit()
+
+
+def get_unnotified_escalations(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Retrieve escalations where notified_at IS NULL."""
+    cur = conn.execute("SELECT * FROM escalations WHERE notified_at IS NULL ORDER BY fired_at")
+    return [dict(row) for row in cur.fetchall()]
 
 
 def get_escalation(conn: sqlite3.Connection, routine_id: str, local_date: str) -> Optional[Dict[str, Any]]:
