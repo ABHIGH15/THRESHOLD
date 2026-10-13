@@ -204,6 +204,37 @@ class TestSchedulerAbsenceEngine(unittest.TestCase):
         self.assertEqual(cur.fetchone()[0], 0)
         conn.close()
 
+    # 4b. Routine whose device has NO device_health row -> unknown and 0 escalations
+    def test_device_with_no_health_row_returns_unknown_and_zero_escalations(self):
+        conn = get_connection(self.db_path)
+        save_routine(
+            conn,
+            routine_id="rt_no_health_data",
+            property_id="prop_1",
+            name="No Health Check",
+            device_id="cam_unseen",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="08:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+            escalation_delay_minutes=30,
+        )
+        # Deliberately DO NOT insert any device_health row for cam_unseen
+        conn.close()
+
+        clock = FakeClock(datetime(2026, 10, 12, 14, 0, 0, tzinfo=timezone.utc))
+        scheduler = Scheduler(db_path=self.db_path, clock=clock)
+        res = scheduler.tick()
+
+        # No data is not absence of activity -> must be UNKNOWN
+        self.assertEqual(res["statuses"]["rt_no_health_data"], STATUS_UNKNOWN)
+
+        conn = get_connection(self.db_path)
+        cur = conn.execute("SELECT COUNT(*) FROM escalations")
+        self.assertEqual(cur.fetchone()[0], 0)
+        conn.close()
+
     # 5. Snoozed -> 0 escalations
     def test_snoozed_routine_returns_zero_escalations(self):
         conn = get_connection(self.db_path)

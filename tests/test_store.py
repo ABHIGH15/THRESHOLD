@@ -10,14 +10,20 @@ import tempfile
 import unittest
 
 from src.threshold.store import (
+    ack_escalation,
     clear_snooze,
     get_connection,
+    get_correction,
     get_device_health,
     get_escalation,
+    get_escalations_due_for_reminder,
     get_event,
     get_routine,
     get_snooze,
     init_db,
+    list_corrections,
+    mark_escalation_notified,
+    mark_escalation_reminded,
     ms_to_iso,
     record_correction,
     record_escalation,
@@ -297,6 +303,97 @@ class TestSQLiteStore(unittest.TestCase):
         self.assertIsNone(get_snooze(self.conn, "rt_meds"))
         routine_cleared = get_routine(self.conn, "rt_meds")
         self.assertIsNone(routine_cleared["snoozed_until"])
+
+    def test_mark_escalation_reminded_and_ack(self):
+        """Test mark_escalation_reminded and ack_escalation update the escalation row."""
+        save_routine(
+            self.conn,
+            routine_id="rt_remind_test",
+            property_id="prop_1",
+            name="Remind Test",
+            device_id="cam_test",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        record_escalation(
+            self.conn,
+            routine_id="rt_remind_test",
+            local_date="2026-10-12",
+            fired_at="2026-10-12T14:35:00Z",
+            notified_at="2026-10-12T14:35:01Z",
+        )
+
+        esc = get_escalation(self.conn, "rt_remind_test", "2026-10-12")
+        self.assertIsNone(esc["reminded_at"])
+        self.assertIsNone(esc["acked_at"])
+
+        # Mark reminded
+        mark_escalation_reminded(self.conn, "rt_remind_test", "2026-10-12", "2026-10-12T14:50:00Z")
+        esc_reminded = get_escalation(self.conn, "rt_remind_test", "2026-10-12")
+        self.assertEqual(esc_reminded["reminded_at"], "2026-10-12T14:50:00Z")
+
+        # Acknowledge
+        ack_escalation(self.conn, "rt_remind_test", "2026-10-12", "2026-10-12T14:52:00Z")
+        esc_acked = get_escalation(self.conn, "rt_remind_test", "2026-10-12")
+        self.assertEqual(esc_acked["acked_at"], "2026-10-12T14:52:00Z")
+
+    def test_get_escalations_due_for_reminder(self):
+        """Test get_escalations_due_for_reminder returns only unacked, unreminded, notified escalations past delay."""
+        save_routine(
+            self.conn,
+            routine_id="rt_esc_ladder",
+            property_id="prop_1",
+            name="Ladder Test",
+            device_id="cam_ladder",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        record_escalation(
+            self.conn,
+            routine_id="rt_esc_ladder",
+            local_date="2026-10-12",
+            fired_at="2026-10-12T14:35:00Z",
+            notified_at="2026-10-12T14:35:00Z",
+        )
+
+        # Before 15 minutes (14:45 UTC) -> not due
+        due_early = get_escalations_due_for_reminder(self.conn, "2026-10-12T14:45:00Z", reminder_delay_minutes=15)
+        self.assertEqual(len(due_early), 0)
+
+        # At 15 minutes (14:50 UTC) -> due
+        due_on_time = get_escalations_due_for_reminder(self.conn, "2026-10-12T14:50:00Z", reminder_delay_minutes=15)
+        self.assertEqual(len(due_on_time), 1)
+        self.assertEqual(due_on_time[0]["routine_id"], "rt_esc_ladder")
+
+        # Once marked reminded -> no longer due
+        mark_escalation_reminded(self.conn, "rt_esc_ladder", "2026-10-12", "2026-10-12T14:50:00Z")
+        due_after_remind = get_escalations_due_for_reminder(self.conn, "2026-10-12T14:55:00Z", reminder_delay_minutes=15)
+        self.assertEqual(len(due_after_remind), 0)
+
+    def test_get_and_list_corrections(self):
+        """Test get_correction and list_corrections retrieval."""
+        record_correction(
+            self.conn,
+            id="corr_test_1",
+            device_id="cam_test",
+            event_type="motion_detected",
+            time_bucket="07:00-09:00",
+            label="false_alarm",
+            created_at="2026-10-12T14:40:00Z",
+        )
+        corr = get_correction(self.conn, "corr_test_1")
+        self.assertIsNotNone(corr)
+        self.assertEqual(corr["id"], "corr_test_1")
+        self.assertEqual(corr["label"], "false_alarm")
+
+        corrs = list_corrections(self.conn)
+        self.assertTrue(any(c["id"] == "corr_test_1" for c in corrs))
 
 
 if __name__ == "__main__":

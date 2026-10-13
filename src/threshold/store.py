@@ -7,7 +7,7 @@ WAL mode enabled. Foreign keys enforced.
 All timestamps stored as UTC ISO-8601 strings.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import sqlite3
@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS escalations (
     fired_at TEXT NOT NULL,
     acked_at TEXT,
     notified_at TEXT,
+    reminded_at TEXT,
     UNIQUE(routine_id, local_date),
     FOREIGN KEY(routine_id) REFERENCES routines(routine_id)
 );
@@ -132,9 +133,13 @@ def init_db(conn_or_path: Optional[Union[sqlite3.Connection, str]] = None) -> sq
         conn = get_connection(conn_or_path)
 
     conn.executescript(SCHEMA_SQL)
-    # Ensure notified_at column exists for existing escalations tables
+    # Ensure notified_at and reminded_at columns exist for existing escalations tables
     try:
         conn.execute("ALTER TABLE escalations ADD COLUMN notified_at TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE escalations ADD COLUMN reminded_at TEXT;")
     except sqlite3.OperationalError:
         pass
     conn.commit()
@@ -332,6 +337,7 @@ def record_escalation(
     fired_at: Union[int, float, str, datetime],
     acked_at: Optional[Union[int, float, str, datetime]] = None,
     notified_at: Optional[Union[int, float, str, datetime]] = None,
+    reminded_at: Optional[Union[int, float, str, datetime]] = None,
     ignore_conflicts: bool = False,
 ) -> bool:
     """
@@ -342,15 +348,16 @@ def record_escalation(
     fired_iso = to_iso_timestamp(fired_at)
     acked_iso = to_iso_timestamp(acked_at) if acked_at is not None else None
     notified_iso = to_iso_timestamp(notified_at) if notified_at is not None else None
+    reminded_iso = to_iso_timestamp(reminded_at) if reminded_at is not None else None
 
     if ignore_conflicts:
-        sql = "INSERT OR IGNORE INTO escalations (routine_id, local_date, fired_at, acked_at, notified_at) VALUES (?, ?, ?, ?, ?)"
-        cur = conn.execute(sql, (routine_id, local_date, fired_iso, acked_iso, notified_iso))
+        sql = "INSERT OR IGNORE INTO escalations (routine_id, local_date, fired_at, acked_at, notified_at, reminded_at) VALUES (?, ?, ?, ?, ?, ?)"
+        cur = conn.execute(sql, (routine_id, local_date, fired_iso, acked_iso, notified_iso, reminded_iso))
         conn.commit()
         return cur.rowcount > 0
     else:
-        sql = "INSERT INTO escalations (routine_id, local_date, fired_at, acked_at, notified_at) VALUES (?, ?, ?, ?, ?)"
-        conn.execute(sql, (routine_id, local_date, fired_iso, acked_iso, notified_iso))
+        sql = "INSERT INTO escalations (routine_id, local_date, fired_at, acked_at, notified_at, reminded_at) VALUES (?, ?, ?, ?, ?, ?)"
+        conn.execute(sql, (routine_id, local_date, fired_iso, acked_iso, notified_iso, reminded_iso))
         conn.commit()
         return True
 
@@ -370,10 +377,68 @@ def mark_escalation_notified(
     conn.commit()
 
 
+def mark_escalation_reminded(
+    conn: sqlite3.Connection,
+    routine_id: str,
+    local_date: str,
+    reminded_at: Union[int, float, str, datetime],
+) -> None:
+    """Mark an escalation as reminded."""
+    iso = to_iso_timestamp(reminded_at)
+    conn.execute(
+        "UPDATE escalations SET reminded_at = ? WHERE routine_id = ? AND local_date = ?",
+        (iso, routine_id, local_date),
+    )
+    conn.commit()
+
+
+def ack_escalation(
+    conn: sqlite3.Connection,
+    routine_id: str,
+    local_date: str,
+    acked_at: Union[int, float, str, datetime],
+) -> None:
+    """Acknowledge an escalation."""
+    iso = to_iso_timestamp(acked_at)
+    conn.execute(
+        "UPDATE escalations SET acked_at = ? WHERE routine_id = ? AND local_date = ?",
+        (iso, routine_id, local_date),
+    )
+    conn.commit()
+
+
 def get_unnotified_escalations(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     """Retrieve escalations where notified_at IS NULL."""
     cur = conn.execute("SELECT * FROM escalations WHERE notified_at IS NULL ORDER BY fired_at")
     return [dict(row) for row in cur.fetchall()]
+
+
+def get_escalations_due_for_reminder(
+    conn: sqlite3.Connection,
+    now: Union[int, float, str, datetime],
+    reminder_delay_minutes: int = 15,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve escalations that have been notified, have not been acknowledged,
+    have not already received a reminder, and where now >= notified_at + reminder_delay_minutes.
+    """
+    now_iso = to_iso_timestamp(now)
+    now_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+
+    cur = conn.execute(
+        "SELECT * FROM escalations WHERE notified_at IS NOT NULL AND acked_at IS NULL AND reminded_at IS NULL ORDER BY fired_at"
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    due = []
+    for r in rows:
+        notified_iso = r["notified_at"].replace("Z", "+00:00")
+        try:
+            notified_dt = datetime.fromisoformat(notified_iso)
+            if now_dt >= notified_dt + timedelta(minutes=reminder_delay_minutes):
+                due.append(r)
+        except Exception:
+            continue
+    return due
 
 
 def get_escalation(conn: sqlite3.Connection, routine_id: str, local_date: str) -> Optional[Dict[str, Any]]:
@@ -403,6 +468,19 @@ def record_correction(
     """
     conn.execute(sql, (id, device_id, event_type, time_bucket, label, created_iso))
     conn.commit()
+
+
+def get_correction(conn: sqlite3.Connection, id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve correction record by ID."""
+    cur = conn.execute("SELECT * FROM corrections WHERE id = ?", (id,))
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def list_corrections(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """List all correction records ordered by created_at."""
+    cur = conn.execute("SELECT * FROM corrections ORDER BY created_at")
+    return [dict(row) for row in cur.fetchall()]
 
 
 def set_snooze(conn: sqlite3.Connection, routine_id: str, until: Union[int, float, str, datetime]) -> None:

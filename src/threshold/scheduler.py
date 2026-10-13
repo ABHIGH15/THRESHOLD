@@ -26,14 +26,22 @@ from src.threshold.status import (
     STATUS_UNKNOWN,
     STATUS_WATCHING,
 )
+from src.threshold.notifier import (
+    ConsoleNotifier,
+    Notifier,
+    RecordingNotifier,
+    TelegramNotifier,
+)
 from src.threshold.store import (
     get_connection,
     get_device_health,
+    get_escalations_due_for_reminder,
     get_routine,
     get_unnotified_escalations,
     init_db,
     list_routines,
     mark_escalation_notified,
+    mark_escalation_reminded,
     record_escalation,
 )
 
@@ -98,34 +106,8 @@ class AcceleratedClock(Clock):
 
 
 # --- 2. Notifier Interfaces ---
-
-class Notifier(ABC):
-    """Abstract notification delivery interface."""
-
-    @abstractmethod
-    def send_escalation(self, routine: Routine, local_date: str, fired_at: str) -> None:
-        """Send escalation notification. Must raise exception on failure."""
-        pass
-
-
-class RecordingNotifier(Notifier):
-    """In-memory recording notifier for tests and simulated failures."""
-
-    def __init__(self, fail_first_n: int = 0):
-        self.sent: List[Dict[str, Any]] = []
-        self.fail_first_n = fail_first_n
-        self.attempts = 0
-
-    def send_escalation(self, routine: Routine, local_date: str, fired_at: str) -> None:
-        self.attempts += 1
-        if self.attempts <= self.fail_first_n:
-            raise RuntimeError(f"Simulated notification failure (attempt {self.attempts})")
-        self.sent.append({
-            "routine_id": routine.routine_id,
-            "routine_name": routine.name,
-            "local_date": local_date,
-            "fired_at": fired_at,
-        })
+# Notifier, RecordingNotifier, ConsoleNotifier, and TelegramNotifier are imported
+# from src.threshold.notifier and re-exported above for backwards compatibility.
 
 
 # --- 3. Model Helpers ---
@@ -214,14 +196,19 @@ def run_scheduler_tick(
     now: datetime,
     notifier: Notifier,
     staleness_threshold_minutes: int = 120,
+    reminder_delay_minutes: int = 15,
 ) -> Dict[str, Any]:
     """
     Execute a single absence detection evaluation tick across all routines:
     1. For every routine, compute status via derive_status().
     2. If missed: INSERT OR IGNORE into escalations table for (routine_id, local_date).
     3. If unknown / snoozed / observed: never escalate.
-    4. For any escalations where notified_at IS NULL: call notifier.send_escalation().
+    4. Poll and process callback queries if notifier supports it (e.g. TelegramNotifier).
+    5. For any escalations where notified_at IS NULL: call notifier.send_escalation().
        If send succeeds, mark notified_at = now. If it raises, leave notified_at NULL.
+    6. For any escalations due for reminder (notified, unacknowledged, unreminded, now >= notified_at + reminder_delay_minutes):
+       Call notifier.send_reminder().
+       If send succeeds, mark reminded_at = now.
     """
     routines = list_routines(conn)
     statuses: Dict[str, str] = {}
@@ -256,7 +243,14 @@ def run_scheduler_tick(
             if inserted:
                 new_escalations += 1
 
-    # Notification delivery with retry
+    # Process caretaker callbacks if notifier supports polling
+    if hasattr(notifier, "poll_and_process_callbacks") and callable(getattr(notifier, "poll_and_process_callbacks")):
+        try:
+            notifier.poll_and_process_callbacks(conn)
+        except Exception as e:
+            logger.warning("Error processing notifier callbacks: %s", e)
+
+    # Initial notification delivery with retry
     unnotified = get_unnotified_escalations(conn)
     delivered_count = 0
 
@@ -283,12 +277,43 @@ def run_scheduler_tick(
             )
             # Leave notified_at NULL to retry next tick
 
+    # Escalation reminder ladder: exactly one reminder after N minutes if unacknowledged
+    due_reminders = get_escalations_due_for_reminder(
+        conn,
+        now=now,
+        reminder_delay_minutes=reminder_delay_minutes,
+    )
+    reminded_count = 0
+
+    for esc in due_reminders:
+        esc_routine_id = esc["routine_id"]
+        local_date = esc["local_date"]
+        fired_at = esc["fired_at"]
+
+        r_row = get_routine(conn, esc_routine_id)
+        if not r_row:
+            continue
+        routine_obj = row_to_routine(r_row)
+
+        try:
+            notifier.send_reminder(routine_obj, local_date, fired_at)
+            mark_escalation_reminded(conn, esc_routine_id, local_date, now)
+            reminded_count += 1
+        except Exception as e:
+            logger.warning(
+                "Reminder notification failed for routine %s (%s): %s",
+                esc_routine_id,
+                local_date,
+                e,
+            )
+
     return {
         "tick_time": now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "routines_checked": len(routines),
         "statuses": statuses,
         "new_escalations": new_escalations,
         "delivered_notifications": delivered_count,
+        "reminded_notifications": reminded_count,
         "pending_notifications": len(get_unnotified_escalations(conn)),
     }
 
@@ -308,12 +333,14 @@ class Scheduler:
         notifier: Optional[Notifier] = None,
         interval_seconds: float = 1.0,
         staleness_threshold_minutes: int = 120,
+        reminder_delay_minutes: int = 15,
     ):
         self.db_path = db_path
         self.clock = clock or RealClock()
         self.notifier = notifier or RecordingNotifier()
         self.interval_seconds = interval_seconds
         self.staleness_threshold_minutes = staleness_threshold_minutes
+        self.reminder_delay_minutes = reminder_delay_minutes
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -330,6 +357,7 @@ class Scheduler:
                 now=tick_time,
                 notifier=self.notifier,
                 staleness_threshold_minutes=self.staleness_threshold_minutes,
+                reminder_delay_minutes=self.reminder_delay_minutes,
             )
             self.last_tick_at = tick_time
             return result

@@ -772,6 +772,45 @@ Ran unit and integration suite:
 rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 ```
 
+#### 4. Verified Policy: `sub_type`, Smart Alerts, and Routine Matching
+- **Field Path:** Official docs confirm `sub_type` is located at `data.attributes.sub_type` (NOT `data.subType`).
+- **Smart Alerts Dependency:**
+  - When Smart Alerts is **disabled** on the device, Ring classifies nothing; every motion event carries `sub_type = "motion"`.
+  - When Smart Alerts is **enabled**, Ring classifies the trigger into `human`, `vehicle`, `package_delivery`, or `other_motion`.
+  - Since no API exposes whether Smart Alerts is enabled, the default routine should match any motion event (`expected_sub_type = NULL`). Only households with Smart Alerts enabled should optionally filter on `expected_sub_type = "human"`.
+
+---
+
+### Task A5: Notifier Module, Escalation Ladder, and Caretaker Corrections Loop
+
+#### 1. Components Delivered
+- **`src/threshold/notifier.py`**:
+  - `Notifier` ABC: `send_escalation(routine, local_date, fired_at)`, `send_reminder(routine, local_date, fired_at)`.
+  - `RecordingNotifier`: Records initial escalations and reminders in-memory, supports `fail_first_n` for delivery retries.
+  - `ConsoleNotifier`: Clean stdout formatter for CLI and testing.
+  - `TelegramNotifier`:
+    - Sends HTML message with inline keyboard `["False alarm", "Got it"]` via `sendMessage`.
+    - Telegram `getUpdates` polling with `last_offset = max(update_id) + 1` tracking.
+    - Chat isolation: verifies incoming chat ID against `TELEGRAM_CHAT_ID`, ignoring unauthorized senders.
+    - Dismisses loading spinners with `answerCallbackQuery`.
+    - Strict token redaction: URL paths (`/bot[REDACTED]/`), query parameters, and error/exception messages.
+- **Store Schema & Operations (`src/threshold/store.py`)**:
+  - Added `reminded_at TEXT` to `escalations` table with backward-compatible migration in `init_db()`.
+  - Added `mark_escalation_reminded(conn, routine_id, local_date, reminded_at)`.
+  - Added `ack_escalation(conn, routine_id, local_date, acked_at)`.
+  - Added `get_escalations_due_for_reminder(conn, now, reminder_delay_minutes=15)`.
+  - Added `get_correction(conn, id)` and `list_corrections(conn)`.
+- **Absence Engine Integration (`src/threshold/scheduler.py`)**:
+  - Escalation reminder ladder: First message on miss, then exactly ONE reminder after $N$ minutes (default 15) if unacknowledged.
+  - No reminders after acknowledgment (`acked_at IS NOT NULL`).
+  - Caretaker callback queries processed on scheduler ticks via `poll_and_process_callbacks(conn)`.
+- **Identity Resolver (`scripts/telegram_whoami.py`)**:
+  - Standalone script querying `getUpdates` to resolve incoming chat ID without leaking bot token.
+- **Automated Test Suite (`tests/test_notifier.py`, `tests/test_store.py`, `tests/test_scheduler.py`)**:
+  - Total test suite expanded to 100 tests (100/100 passing).
+
+
+
 
 
 
