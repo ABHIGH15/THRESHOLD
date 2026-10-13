@@ -210,11 +210,11 @@ class TestNotifierSystem(unittest.TestCase):
 
         # Button 0: False alarm
         self.assertEqual(row[0]["text"], "False alarm")
-        self.assertEqual(row[0]["callback_data"], "false_alarm:rt_morning_door:2026-10-12")
+        self.assertEqual(row[0]["callback_data"], "fa:rt_morning_door:2026-10-12")
 
         # Button 1: Got it
         self.assertEqual(row[1]["text"], "Got it")
-        self.assertEqual(row[1]["callback_data"], "ack:rt_morning_door:2026-10-12")
+        self.assertEqual(row[1]["callback_data"], "ak:rt_morning_door:2026-10-12")
 
     # 2. Foreign chat ignored
     def test_foreign_chat_ignored_chat_isolation(self):
@@ -657,6 +657,151 @@ class TestNotifierSystem(unittest.TestCase):
         self.assertIn("Chat ID:   1234567", output)
         self.assertIn("TELEGRAM_CHAT_ID=1234567", output)
         self.assertNotIn("dummy_token_987", output)
+
+    # 11. Console notifier message format (Step 0 a)
+    def test_console_notifier_message_content_and_phone_call_disclaimer(self):
+        """ConsoleNotifier output contains Escalation label, expected-by time, health, last activity, and plain sentence."""
+        from io import StringIO
+        import sys
+
+        console = ConsoleNotifier()
+        captured = StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = captured
+            console.send_escalation(
+                self.sample_routine,
+                local_date="2026-10-12",
+                fired_at="2026-10-12T14:35:00Z",
+            )
+            console.send_reminder(
+                self.sample_routine,
+                local_date="2026-10-12",
+                fired_at="2026-10-12T14:35:00Z",
+            )
+        finally:
+            sys.stdout = old_stdout
+
+        out = captured.getvalue()
+        # Label Escalation & Reminder
+        self.assertIn("ESCALATION", out)
+        self.assertIn("REMINDER", out)
+        # Routine name
+        self.assertIn("Morning Door", out)
+        # Expected-by local time
+        self.assertIn("09:30 America/Chicago", out)
+        # Device state & last activity
+        self.assertIn("Device State:", out)
+        self.assertIn("Last Activity:", out)
+        # Plain sentence that this is a message, not a phone call
+        self.assertIn("This is an automated text message notification, not a phone call.", out)
+
+    # 12. callback_data <= 64 bytes with 36-char UUID routine id (Step 0 d)
+    def test_callback_data_under_64_bytes_with_uuid(self):
+        """callback_data stays strictly at or under 64 bytes even with a 36-character UUID routine id."""
+        uuid_routine = Routine(
+            property_id="prop_uuid",
+            name="UUID Routine",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone="America/Chicago",
+            days=["mon"],
+            escalation_delay_minutes=30,
+        )
+        uuid_routine.routine_id = "c4b8b6a2-6f29-4d6b-8526-778899aabbcc"  # 36 chars
+
+        notifier = TelegramNotifier(
+            bot_token="test_tok",
+            chat_id="5551234",
+            base_url=self.base_url,
+        )
+        notifier.send_escalation(uuid_routine, "2026-10-12", "2026-10-12T14:35:00Z")
+
+        msg = self.server.sent_messages[-1]
+        keyboard = msg["reply_markup"]["inline_keyboard"][0]
+        for button in keyboard:
+            data_bytes = button["callback_data"].encode("utf-8")
+            self.assertLessEqual(len(data_bytes), 64, f"callback_data '{button['callback_data']}' exceeds 64 bytes ({len(data_bytes)})")
+
+    # 13. Persisting getUpdates offset & idempotent False alarm across restart (Step 0 b)
+    def test_replayed_callback_after_restart_creates_no_second_correction(self):
+        """Replaying the same callback after a simulated restart creates NO second correction row."""
+        conn = get_connection(self.db_path)
+        save_routine(
+            conn,
+            routine_id="rt_restart_test",
+            property_id="prop_1",
+            name="Restart Routine",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        record_escalation(
+            conn,
+            routine_id="rt_restart_test",
+            local_date="2026-10-12",
+            fired_at="2026-10-12T14:35:00Z",
+            notified_at="2026-10-12T14:35:01Z",
+        )
+
+        notifier1 = TelegramNotifier(bot_token="tok1", chat_id="5551234", base_url=self.base_url)
+        self.server.queued_updates = [
+            {
+                "update_id": 77,
+                "callback_query": {
+                    "id": "cb_fa_replay",
+                    "data": "fa:rt_restart_test:2026-10-12",
+                    "message": {"chat": {"id": 5551234}},
+                },
+            }
+        ]
+
+        # First delivery: creates 1 correction row and records offset 78 in DB
+        notifier1.poll_and_process_callbacks(conn)
+        corrs = list_corrections(conn)
+        self.assertEqual(len(corrs), 1)
+
+        # Simulate process restart: create a new notifier instance on same db
+        notifier2 = TelegramNotifier(bot_token="tok1", chat_id="5551234", base_url=self.base_url)
+        # Even if the server delivers or replays the same callback update:
+        self.server.queued_updates = [
+            {
+                "update_id": 77,
+                "callback_query": {
+                    "id": "cb_fa_replay",
+                    "data": "fa:rt_restart_test:2026-10-12",
+                    "message": {"chat": {"id": 5551234}},
+                },
+            }
+        ]
+
+        # Re-polling should ignore update_id 77 because persisted offset is 78
+        notifier2.poll_and_process_callbacks(conn)
+        self.assertEqual(len(list_corrections(conn)), 1)
+        conn.close()
+
+    # 14. Short poll / zero timeout during scheduler tick (Step 0 c)
+    def test_getupdates_uses_zero_timeout_during_scheduler_tick(self):
+        """getUpdates uses timeout=0 so scheduler tick can never block."""
+        clock = FakeClock(datetime(2026, 10, 12, 14, 35, 0, tzinfo=timezone.utc))
+        notifier = TelegramNotifier(bot_token="tok_timeout", chat_id="5551234", base_url=self.base_url)
+        scheduler = Scheduler(db_path=self.db_path, clock=clock, notifier=notifier)
+
+        scheduler.tick()
+
+        # Find the getUpdates request sent during tick
+        get_updates_reqs = [
+            r for r in self.server.requests_log
+            if r["path"].endswith("/getUpdates")
+        ]
+        self.assertGreaterEqual(len(get_updates_reqs), 1)
+        last_req = get_updates_reqs[-1]
+        self.assertEqual(last_req["payload"].get("timeout"), 0, "Scheduler tick must use timeout=0 for getUpdates")
 
 
 if __name__ == "__main__":

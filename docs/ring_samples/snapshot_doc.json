@@ -1,0 +1,36 @@
+{
+  "step": "snapshot_doc_attempt1",
+  "timestamp_utc": "20261012T142408Z",
+  "method": "POST",
+  "url": "https://api.amazonvision.com/v1/devices/ava1.ring.device.EXAMPLE/media/image/download",
+  "request_body": "{}",
+  "status": 403,
+  "error_message": "403 Forbidden - check token permissions",
+  "response_headers": {
+    "Date": "Mon, 12 Oct 2026 14:24:09 GMT",
+    "Content-Type": "application/json",
+    "Content-Length": "224",
+    "Connection": "close",
+    "x-request-id": "d97e1e27-788d-4f34-bc35-1d161803be6d",
+    "x-envoy-upstream-service-time": "22",
+    "server": "envoy"
+  },
+  "content_type": "application/json",
+  "byte_size": 224,
+  "magic_format": null,
+  "body_json": {
+    "errors": [
+      {
+        "id": "d97e1e27-788d-4f34-bc35-1d161803be6d",
+        "status": "403",
+        "code": "REQUEST_FORBIDDEN",
+        "detail": "Cannot authorize: missing required timestamp fields in request body",
+        "meta": {
+          "timestamp": "2026-10-12T14:24:09Z"
+        }
+      }
+    ]
+  },
+  "raw_body": "{\"errors\":[{\"id\":\"d97e1e27-788d-4f34-bc35-1d161803be6d\",\"status\":\"403\",\"code\":\"REQUEST_FORBIDDEN\",\"detail\":\"Cannot authorize: missing required timestamp fields in request body\",\"meta\":{\"timestamp\":\"2026-10-12T14:24:09Z\"}}]}\n",
+  "image_file": null
+}

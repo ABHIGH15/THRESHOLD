@@ -122,6 +122,12 @@ CREATE TABLE IF NOT EXISTS corrections (
     label TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT NOT NULL PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -140,6 +146,10 @@ def init_db(conn_or_path: Optional[Union[sqlite3.Connection, str]] = None) -> sq
         pass
     try:
         conn.execute("ALTER TABLE escalations ADD COLUMN reminded_at TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);")
     except sqlite3.OperationalError:
         pass
     conn.commit()
@@ -459,14 +469,35 @@ def record_correction(
     time_bucket: str,
     label: str,
     created_at: Union[int, float, str, datetime],
-) -> None:
-    """Save a caretaker correction record."""
+    ignore_conflicts: bool = True,
+) -> bool:
+    """Save a caretaker correction record (idempotent by default)."""
     created_iso = to_iso_timestamp(created_at)
-    sql = """
-    INSERT INTO corrections (id, device_id, event_type, time_bucket, label, created_at)
+    cmd = "INSERT OR IGNORE" if ignore_conflicts else "INSERT"
+    sql = f"""
+    {cmd} INTO corrections (id, device_id, event_type, time_bucket, label, created_at)
     VALUES (?, ?, ?, ?, ?, ?)
     """
-    conn.execute(sql, (id, device_id, event_type, time_bucket, label, created_iso))
+    cur = conn.execute(sql, (id, device_id, event_type, time_bucket, label, created_iso))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_app_state(conn: sqlite3.Connection, key: str, default: Optional[str] = None) -> Optional[str]:
+    """Retrieve a persisted key-value string from app_state table."""
+    cur = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,))
+    row = cur.fetchone()
+    return row["value"] if row else default
+
+
+def set_app_state(conn: sqlite3.Connection, key: str, value: Any) -> None:
+    """Store or update a key-value string in app_state table."""
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.execute(
+        "INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (key, str(value), now_iso),
+    )
     conn.commit()
 
 

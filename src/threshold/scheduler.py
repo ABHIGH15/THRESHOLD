@@ -264,8 +264,15 @@ def run_scheduler_tick(
             continue
         routine_obj = row_to_routine(r_row)
 
+        health = build_device_health_record(
+            conn=conn,
+            device_id=routine_obj.device_id,
+            now=now,
+            staleness_threshold_minutes=staleness_threshold_minutes,
+        )
+
         try:
-            notifier.send_escalation(routine_obj, local_date, fired_at)
+            notifier.send_escalation(routine_obj, local_date, fired_at, device_health=health)
             mark_escalation_notified(conn, esc_routine_id, local_date, now)
             delivered_count += 1
         except Exception as e:
@@ -294,9 +301,15 @@ def run_scheduler_tick(
         if not r_row:
             continue
         routine_obj = row_to_routine(r_row)
+        health = build_device_health_record(
+            conn=conn,
+            device_id=routine_obj.device_id,
+            now=now,
+            staleness_threshold_minutes=staleness_threshold_minutes,
+        )
 
         try:
-            notifier.send_reminder(routine_obj, local_date, fired_at)
+            notifier.send_reminder(routine_obj, local_date, fired_at, device_health=health)
             mark_escalation_reminded(conn, esc_routine_id, local_date, now)
             reminded_count += 1
         except Exception as e:

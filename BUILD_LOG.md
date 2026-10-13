@@ -809,6 +809,99 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 - **Automated Test Suite (`tests/test_notifier.py`, `tests/test_store.py`, `tests/test_scheduler.py`)**:
   - Total test suite expanded to 100 tests (100/100 passing).
 
+---
+
+### Step 0 Review Fixes (Notifier & Escalation Hardening)
+
+#### 1. Message Copy & Phone Call Disclaimer
+- Added explicit user-facing disclaimer: `"This is an automated text message notification, not a phone call."`
+- Escalation format:
+  ```text
+  [Escalation] Pattern Absence Detected: Morning Medicine Routine
+  Expected by: 09:30 CDT (2026-10-12)
+  Device state: door_sensor (online, battery: 92%)
+  Last activity: 2026-10-11 21:15 CDT (0.5 days ago)
+
+  Threshold did not observe expected activity within the scheduled window.
+  Note: This is an automated text message notification, not a phone call.
+  ```
+- Reminder format:
+  ```text
+  [Reminder] Pattern Absence Unacknowledged: Morning Medicine Routine
+  Expected by: 09:30 CDT (2026-10-12)
+  Device state: door_sensor (online, battery: 92%)
+  Last activity: 2026-10-11 21:15 CDT (0.5 days ago)
+
+  This pattern absence remains unacknowledged.
+  Note: This is an automated text message notification, not a phone call.
+  ```
+
+#### 2. Telegram Offset Persistence & Deterministic Corrections
+- Added `app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)` table to SQLite schema.
+- Telegram `getUpdates` offset is persisted in `app_state` under key `telegram_last_offset`. Restarts preserve progress without reprocessing prior updates.
+- Caretaker "False alarm" callbacks record a deterministic correction row `corr_{routine_id}_{local_date}` with `INSERT OR IGNORE`. Replayed callbacks produce no duplicate correction records.
+
+#### 3. Zero-Timeout Short Poll on Scheduler Tick
+- `poll_and_process_callbacks(conn, timeout=0)` executes a non-blocking short poll during each scheduler tick, guaranteeing that the absence evaluation thread never stalls waiting for incoming HTTP responses.
+
+#### 4. Callback Data Hard 64-Byte Limit
+- Telegram inline keyboard callback data uses compact prefixes:
+  - `fa:{routine_id}:{local_date}` (False alarm)
+  - `ak:{routine_id}:{local_date}` (Got it / Ack)
+- With standard 36-character UUIDs:
+  `len("fa:12345678-1234-1234-1234-123456789abc:2026-10-12") == 50 bytes <= 64 bytes`.
+
+---
+
+### Task A6: Ring Partner API Client, Poll Mode, and Redacted Documentation
+
+#### 1. Ring Client (`src/threshold/ring_client.py`)
+- Implemented with Python standard library `urllib` only. Zero third-party dependencies.
+- **Methods:**
+  - `list_devices()`: Calls `GET /v1/devices`, returns parsed device list.
+  - `get_device_status(device_id)`: Calls `GET /v1/devices/{id}/status`.
+  - `get_event_history(device_id, event_types=None)`: Calls `GET /v1/history/devices/{id}/events`.
+  - `get_snapshot(device_id, timestamp_ms)`: Two-step snapshot acquisition flow.
+    - Step 1: `POST /v1/devices/{id}/media/image/download` with body `{"type": "at_timestamp", "timestamp": <ms>}`. Uses `NoRedirectHandler` to intercept `303 See Other` without auto-following.
+    - Step 2: Extracts `Location` pre-signed URL and issues `GET` **without** `Authorization` header, preventing Ring bearer token leakage to download hosts/CDNs.
+- **Typed Error Hierarchy:**
+  - `TokenExpired` (HTTP 401)
+  - `RateLimited` (HTTP 429 with exponential backoff and `Retry-After` header support)
+  - `MediaUnavailable` (HTTP 416 MEDIA_NOT_FOUND, HTTP 425 RECORDING_NOT_READY, HTTP 422 CORRUPT_RECORDING)
+  - `Forbidden` (HTTP 403)
+  - `NotFound` (HTTP 404)
+  - `BadRequest` (HTTP 400)
+  - `ServerError` (HTTP 5xx)
+  - Token redaction active on all error messages and URL formatting.
+- **Poll Mode Engine (`poll_once`):**
+  - Polling engine querying devices, statuses, and event history.
+  - Idempotent upsert into `device_health` and `events`.
+  - Ingests event history with source `'history'` and stores Ring history event types verbatim without altering webhook schemas. Polling twice leaves exactly 1 health row per device and zero duplicate events.
+
+#### 2. Redacted Samples (`docs/ring_samples/`)
+- Extracted and redacted verified payload structures from live playground sessions:
+  - `list_devices.json`: Redacted device listing (`ava1.ring.device.EXAMPLE_DOORBELL`).
+  - `device_status.json`: Redacted device battery, wifi, and status fields.
+  - `device_capabilities.json`: Redacted device capability mappings.
+  - `event_history.json`: Redacted history records with ms-epoch timestamps and event types (`on_demand`).
+  - `user_profile.json`: Redacted user account metadata.
+  - `snapshot_doc.json`: Official Ring specification for snapshot media acquisition.
+- Verified that all real account, user, and device identifiers are sanitized.
+
+#### 3. CLI Subcommand (`src/threshold/__main__.py`)
+- Added `python3 -m src.threshold ring-check` command.
+- Inspects devices, device status, and recent history using credentials in `.env`, redacting sensitive values.
+
+#### 4. Automated Verification (`tests/test_ring_client.py`)
+- 11 unit tests executed against local HTTP test server covering:
+  - Request shapes and authorization headers for all endpoints.
+  - Snapshot 303 flow and credential stripping.
+  - 429 rate limit backoff and retry.
+  - All typed error classifications.
+  - `poll_once` idempotence (double poll verification).
+- Total suite: **115 tests passing** (100 baseline + 4 notifier hardening + 11 ring client).
+
+
 
 
 

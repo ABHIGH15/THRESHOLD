@@ -7,6 +7,7 @@ chat isolation, and strict token redaction across logs and error messages.
 
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import re
@@ -14,10 +15,15 @@ import sqlite3
 from typing import Any, Dict, List, Optional, Union
 import urllib.error
 import urllib.request
-import uuid
 
 from src.threshold.models import Routine
-from src.threshold.store import ack_escalation, get_routine, record_correction
+from src.threshold.store import (
+    ack_escalation,
+    get_app_state,
+    get_routine,
+    record_correction,
+    set_app_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,16 +43,73 @@ def redact_telegram_token(text: str, token: Optional[str] = None) -> str:
     return result
 
 
+def format_expected_by(routine: Routine) -> str:
+    """Format expected-by deadline in the routine's local timezone."""
+    try:
+        parts = routine.window_end.split(":")
+        end_hour = int(parts[0])
+        end_min = int(parts[1])
+        total_mins = end_hour * 60 + end_min + getattr(routine, "escalation_delay_minutes", 30)
+        dead_h = (total_mins // 60) % 24
+        dead_m = total_mins % 60
+        return f"{dead_h:02d}:{dead_m:02d} {routine.timezone} (window {routine.window_start}-{routine.window_end} + {routine.escalation_delay_minutes}m delay)"
+    except Exception:
+        return f"{routine.window_end} {routine.timezone}"
+
+
+def format_health_state(routine: Routine, device_health: Optional[Any] = None) -> str:
+    """Format device health state string."""
+    if device_health is not None:
+        if hasattr(device_health, "last_event_at") and device_health.last_event_at is not None:
+            return f"Online / Healthy ({routine.device_id})"
+        return f"Unknown / Stale ({routine.device_id})"
+    return f"Online / Healthy ({routine.device_id})"
+
+
+def format_last_activity(routine: Routine, device_health: Optional[Any] = None) -> str:
+    """Format last recorded activity timestamp."""
+    if routine.last_satisfied_at:
+        return routine.last_satisfied_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+    if device_health and hasattr(device_health, "last_event_at") and device_health.last_event_at:
+        return device_health.last_event_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+    return "None recorded within window"
+
+
+def make_callback_data(prefix: str, routine_id: str, local_date: str) -> str:
+    """
+    Construct inline keyboard callback_data staying strictly at or under 64 bytes.
+    Uses compact prefix ('fa' for False alarm, 'ak' for Got it).
+    """
+    cb = f"{prefix}:{routine_id}:{local_date}"
+    if len(cb.encode("utf-8")) <= 64:
+        return cb
+    # Fallback to deterministic truncated hash if routine_id exceeds length
+    hashed = hashlib.sha256(routine_id.encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}:{hashed}:{local_date}"
+
+
 class Notifier(ABC):
     """Abstract notification delivery interface."""
 
     @abstractmethod
-    def send_escalation(self, routine: Routine, local_date: str, fired_at: str) -> None:
+    def send_escalation(
+        self,
+        routine: Routine,
+        local_date: str,
+        fired_at: str,
+        device_health: Optional[Any] = None,
+    ) -> None:
         """Send initial escalation notification. Must raise exception on failure."""
         pass
 
     @abstractmethod
-    def send_reminder(self, routine: Routine, local_date: str, fired_at: str) -> None:
+    def send_reminder(
+        self,
+        routine: Routine,
+        local_date: str,
+        fired_at: str,
+        device_health: Optional[Any] = None,
+    ) -> None:
         """Send reminder notification for unacknowledged escalation. Must raise exception on failure."""
         pass
 
@@ -60,7 +123,13 @@ class RecordingNotifier(Notifier):
         self.fail_first_n = fail_first_n
         self.attempts = 0
 
-    def send_escalation(self, routine: Routine, local_date: str, fired_at: str) -> None:
+    def send_escalation(
+        self,
+        routine: Routine,
+        local_date: str,
+        fired_at: str,
+        device_health: Optional[Any] = None,
+    ) -> None:
         self.attempts += 1
         if self.attempts <= self.fail_first_n:
             raise RuntimeError(f"Simulated notification failure (attempt {self.attempts})")
@@ -69,9 +138,16 @@ class RecordingNotifier(Notifier):
             "routine_name": routine.name,
             "local_date": local_date,
             "fired_at": fired_at,
+            "device_health": device_health,
         })
 
-    def send_reminder(self, routine: Routine, local_date: str, fired_at: str) -> None:
+    def send_reminder(
+        self,
+        routine: Routine,
+        local_date: str,
+        fired_at: str,
+        device_health: Optional[Any] = None,
+    ) -> None:
         self.attempts += 1
         if self.attempts <= self.fail_first_n:
             raise RuntimeError(f"Simulated reminder notification failure (attempt {self.attempts})")
@@ -80,17 +156,52 @@ class RecordingNotifier(Notifier):
             "routine_name": routine.name,
             "local_date": local_date,
             "fired_at": fired_at,
+            "device_health": device_health,
         })
 
 
 class ConsoleNotifier(Notifier):
     """Console / stdout notifier for CLI operations and demonstrations."""
 
-    def send_escalation(self, routine: Routine, local_date: str, fired_at: str) -> None:
-        print(f"[ESCALATION] Routine '{routine.name}' ({routine.routine_id}) missed on {local_date} at {fired_at}")
+    def send_escalation(
+        self,
+        routine: Routine,
+        local_date: str,
+        fired_at: str,
+        device_health: Optional[Any] = None,
+    ) -> None:
+        expected_by = format_expected_by(routine)
+        health_state = format_health_state(routine, device_health)
+        last_act = format_last_activity(routine, device_health)
+        print(
+            f"[ESCALATION]\n"
+            f"Routine: {routine.name} ({routine.routine_id})\n"
+            f"Expected by: {expected_by}\n"
+            f"Device State: {health_state}\n"
+            f"Last Activity: {last_act}\n"
+            f"Fired at: {fired_at} (Date: {local_date})\n"
+            f"Note: This is an automated text message notification, not a phone call."
+        )
 
-    def send_reminder(self, routine: Routine, local_date: str, fired_at: str) -> None:
-        print(f"[REMINDER] Routine '{routine.name}' ({routine.routine_id}) unacknowledged for {local_date} (fired at {fired_at})")
+    def send_reminder(
+        self,
+        routine: Routine,
+        local_date: str,
+        fired_at: str,
+        device_health: Optional[Any] = None,
+    ) -> None:
+        expected_by = format_expected_by(routine)
+        health_state = format_health_state(routine, device_health)
+        last_act = format_last_activity(routine, device_health)
+        print(
+            f"[REMINDER: Escalation Unacknowledged]\n"
+            f"Routine: {routine.name} ({routine.routine_id})\n"
+            f"Expected by: {expected_by}\n"
+            f"Device State: {health_state}\n"
+            f"Last Activity: {last_act}\n"
+            f"Originally fired at: {fired_at} (Date: {local_date})\n"
+            f"Note: This is an automated text message notification, not a phone call."
+        )
 
 
 class TelegramNotifier(Notifier):
@@ -147,29 +258,44 @@ class TelegramNotifier(Notifier):
             logger.error("Telegram API call to %s failed: %s", endpoint, redacted_msg)
             raise RuntimeError(f"Telegram API request to {endpoint} failed: {redacted_msg}") from None
 
-    def send_escalation(self, routine: Routine, local_date: str, fired_at: str) -> None:
+    def send_escalation(
+        self,
+        routine: Routine,
+        local_date: str,
+        fired_at: str,
+        device_health: Optional[Any] = None,
+    ) -> None:
         """
         Send initial escalation notification with inline keyboard:
         ['False alarm', 'Got it']
         """
+        expected_by = format_expected_by(routine)
+        health_state = format_health_state(routine, device_health)
+        last_act = format_last_activity(routine, device_health)
+
         text = (
             f"🚨 <b>THRESHOLD ESCALATION</b>\n\n"
             f"Routine: <b>{routine.name}</b>\n"
-            f"Expected window: {routine.window_start} - {routine.window_end} ({routine.timezone})\n"
+            f"Expected by: {expected_by}\n"
+            f"Device State: {health_state}\n"
+            f"Last Activity: {last_act}\n"
             f"Fired at: {fired_at}\n\n"
-            f"Absence detected. No expected activity observed."
+            f"<i>Please note: this is an automated message notification, not a phone call.</i>"
         )
+
+        fa_data = make_callback_data("fa", routine.routine_id, local_date)
+        ak_data = make_callback_data("ak", routine.routine_id, local_date)
 
         keyboard = {
             "inline_keyboard": [
                 [
                     {
                         "text": "False alarm",
-                        "callback_data": f"false_alarm:{routine.routine_id}:{local_date}",
+                        "callback_data": fa_data,
                     },
                     {
                         "text": "Got it",
-                        "callback_data": f"ack:{routine.routine_id}:{local_date}",
+                        "callback_data": ak_data,
                     },
                 ]
             ]
@@ -184,28 +310,43 @@ class TelegramNotifier(Notifier):
 
         self._make_request("sendMessage", payload)
 
-    def send_reminder(self, routine: Routine, local_date: str, fired_at: str) -> None:
+    def send_reminder(
+        self,
+        routine: Routine,
+        local_date: str,
+        fired_at: str,
+        device_health: Optional[Any] = None,
+    ) -> None:
         """
         Send reminder notification for unacknowledged escalation with inline keyboard.
         """
+        expected_by = format_expected_by(routine)
+        health_state = format_health_state(routine, device_health)
+        last_act = format_last_activity(routine, device_health)
+
         text = (
-            f"⚠️ <b>THRESHOLD REMINDER</b>\n\n"
+            f"⚠️ <b>THRESHOLD REMINDER: Escalation Unacknowledged</b>\n\n"
             f"Routine: <b>{routine.name}</b>\n"
-            f"Expected window: {routine.window_start} - {routine.window_end} ({routine.timezone})\n"
+            f"Expected by: {expected_by}\n"
+            f"Device State: {health_state}\n"
+            f"Last Activity: {last_act}\n"
             f"Originally fired at: {fired_at}\n\n"
-            f"Escalation remains unacknowledged. Please check on resident."
+            f"<i>Please note: this is an automated message notification, not a phone call.</i>"
         )
+
+        fa_data = make_callback_data("fa", routine.routine_id, local_date)
+        ak_data = make_callback_data("ak", routine.routine_id, local_date)
 
         keyboard = {
             "inline_keyboard": [
                 [
                     {
                         "text": "False alarm",
-                        "callback_data": f"false_alarm:{routine.routine_id}:{local_date}",
+                        "callback_data": fa_data,
                     },
                     {
                         "text": "Got it",
-                        "callback_data": f"ack:{routine.routine_id}:{local_date}",
+                        "callback_data": ak_data,
                     },
                 ]
             ]
@@ -223,6 +364,7 @@ class TelegramNotifier(Notifier):
     def get_updates(self, offset: Optional[int] = None, timeout: int = 0) -> List[Dict[str, Any]]:
         """
         Poll updates from Telegram with offset tracking.
+        Default timeout=0 guarantees non-blocking short poll.
         """
         req_offset = self.last_offset if offset is None else offset
         payload = {
@@ -247,16 +389,30 @@ class TelegramNotifier(Notifier):
         resp = self._make_request("answerCallbackQuery", payload)
         return bool(resp.get("ok", False))
 
-    def poll_and_process_callbacks(self, conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    def poll_and_process_callbacks(self, conn: sqlite3.Connection, timeout: int = 0) -> List[Dict[str, Any]]:
         """
         Poll Telegram for updates, filter for callback queries from authorized chat,
         and update SQLite escalation / correction state accordingly:
+        - Persists last_offset in app_state table across process restarts.
+        - Short poll: uses timeout=0 so scheduler ticks never block.
         - Chat isolation: Ignores queries from chat IDs other than TELEGRAM_CHAT_ID.
-        - 'Got it' (or 'ack:...'): sets escalations.acked_at.
-        - 'False alarm' (or 'false_alarm:...'): writes a corrections row and sets escalations.acked_at.
+        - 'Got it' (or 'ak:...'): sets escalations.acked_at.
+        - 'False alarm' (or 'fa:...'): writes a corrections row idempotently and sets escalations.acked_at.
         - Acknowledges each processed query via answerCallbackQuery.
         """
-        updates = self.get_updates()
+        # Load offset from SQLite if not yet initialized in-memory
+        if self.last_offset == 0:
+            persisted = get_app_state(conn, "telegram_last_offset")
+            if persisted:
+                try:
+                    self.last_offset = int(persisted)
+                except ValueError:
+                    pass
+
+        updates = self.get_updates(timeout=timeout)
+        # Persist updated offset
+        set_app_state(conn, "telegram_last_offset", self.last_offset)
+
         processed: List[Dict[str, Any]] = []
 
         for u in updates:
@@ -287,7 +443,10 @@ class TelegramNotifier(Notifier):
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
             # Route 1: False alarm -> record correction + ack escalation
-            if cb_data.startswith("false_alarm:") or cb_data == "False alarm":
+            is_fa = cb_data.startswith("fa:") or cb_data.startswith("false_alarm:") or cb_data == "False alarm"
+            is_ak = cb_data.startswith("ak:") or cb_data.startswith("ack:") or cb_data == "Got it"
+
+            if is_fa:
                 routine_id, local_date = None, None
                 if ":" in cb_data:
                     parts = cb_data.split(":", 2)
@@ -308,7 +467,8 @@ class TelegramNotifier(Notifier):
                     event_type = r_row["expected_event_type"] if r_row else "motion_detected"
                     time_bucket = f"{r_row['window_start']}-{r_row['window_end']}" if r_row else local_date
 
-                    corr_id = f"corr_{uuid.uuid4().hex[:8]}"
+                    # Deterministic ID ensures idempotent inserts (no duplicate correction rows)
+                    corr_id = f"corr_{routine_id}_{local_date}"
                     record_correction(
                         conn=conn,
                         id=corr_id,
@@ -317,6 +477,7 @@ class TelegramNotifier(Notifier):
                         time_bucket=time_bucket,
                         label="false_alarm",
                         created_at=now_iso,
+                        ignore_conflicts=True,
                     )
                     ack_escalation(conn, routine_id, local_date, now_iso)
                     if cb_id:
@@ -329,7 +490,7 @@ class TelegramNotifier(Notifier):
                     })
 
             # Route 2: Got it / ack -> ack escalation
-            elif cb_data.startswith("ack:") or cb_data == "Got it":
+            elif is_ak:
                 routine_id, local_date = None, None
                 if ":" in cb_data:
                     parts = cb_data.split(":", 2)

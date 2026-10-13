@@ -1,0 +1,80 @@
+{
+  "step": "device_capabilities",
+  "timestamp_utc": "20261012T142405Z",
+  "method": "GET",
+  "url": "https://api.amazonvision.com/v1/devices/ava1.ring.device.EXAMPLE/capabilities",
+  "request_body": null,
+  "status": 200,
+  "error_message": null,
+  "response_headers": {
+    "Date": "Mon, 12 Oct 2026 14:24:06 GMT",
+    "Content-Type": "application/json",
+    "Transfer-Encoding": "chunked",
+    "Connection": "close",
+    "x-request-id": "5d319bc5-75f1-4c1e-983c-d340893bb335",
+    "x-envoy-upstream-service-time": "698",
+    "server": "envoy"
+  },
+  "content_type": "application/json",
+  "byte_size": 1440,
+  "magic_format": null,
+  "body_json": {
+    "data": {
+      "type": "device-capabilities",
+      "id": "ava1.ring.device.capabilities.EXAMPLE",
+      "attributes": {
+        "motion_detection": {
+          "configurations": [
+            "enabled",
+            "motion_zones"
+          ]
+        },
+        "flood_detection": null,
+        "co_detection_listener": null,
+        "audio": {
+          "customizable_slots": null,
+          "supported_actions": null
+        },
+        "video": {
+          "configurations": [
+            "resolution_mode"
+          ],
+          "codecs": [
+            "AVC"
+          ],
+          "ratio": "16:9",
+          "max_resolution": 1080,
+          "supported_resolutions": [
+            1080
+          ]
+        },
+        "tamper_detection": null,
+        "glass_break_detection": null,
+        "freeze_detection": null,
+        "smoke_detection": null,
+        "battery_status": null,
+        "contact_detection": null,
+        "image_enhancements": {
+          "configurations": [
+            "color_night_vision",
+            "privacy_zones",
+            "snapshot"
+          ]
+        }
+      },
+      "relationships": {
+        "configurations": {
+          "links": {
+            "related": "/v1/devices/ava1.ring.device.EXAMPLE/configurations"
+          }
+        },
+        "data": {}
+      }
+    },
+    "meta": {
+      "time": "2026-10-12T14:24:06Z"
+    }
+  },
+  "raw_body": "{\n  \"data\": {\n    \"type\": \"device-capabilities\",\n    \"id\": \"ava1.ring.device.capabilities.EXAMPLE\",\n    \"attributes\": {\n      \"motion_detection\": {\n        \"configurations\": [\n          \"enabled\",\n          \"motion_zones\"\n        ]\n      },\n      \"flood_detection\": null,\n      \"co_detection_listener\": null,\n      \"audio\": {\n        \"customizable_slots\": null,\n        \"supported_actions\": null\n      },\n      \"video\": {\n        \"configurations\": [\n          \"resolution_mode\"\n        ],\n        \"codecs\": [\n          \"AVC\"\n        ],\n        \"ratio\": \"16:9\",\n        \"max_resolution\": 1080,\n        \"supported_resolutions\": [\n          1080\n        ]\n      },\n      \"tamper_detection\": null,\n      \"glass_break_detection\": null,\n      \"freeze_detection\": null,\n      \"smoke_detection\": null,\n      \"battery_status\": null,\n      \"contact_detection\": null,\n      \"image_enhancements\": {\n        \"configurations\": [\n          \"color_night_vision\",\n          \"privacy_zones\",\n          \"snapshot\"\n        ]\n      }\n    },\n    \"relationships\": {\n      \"configurations\": {\n        \"links\": {\n          \"related\": \"/v1/devices/ava1.ring.device.EXAMPLE/configurations\"\n        }\n      },\n      \"data\": {}\n    }\n  },\n  \"meta\": {\n    \"time\": \"2026-10-12T14:24:06Z\"\n  }\n}",
+  "image_file": null
+}

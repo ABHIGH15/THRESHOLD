@@ -1,0 +1,43 @@
+{
+  "step": "device_status",
+  "timestamp_utc": "20261012T142403Z",
+  "method": "GET",
+  "url": "https://api.amazonvision.com/v1/devices/ava1.ring.device.EXAMPLE/status",
+  "request_body": null,
+  "status": 200,
+  "error_message": null,
+  "response_headers": {
+    "Date": "Mon, 12 Oct 2026 14:24:05 GMT",
+    "Content-Type": "application/json",
+    "Transfer-Encoding": "chunked",
+    "Connection": "close",
+    "x-request-id": "67782f77-02c8-4104-9f3e-d49214cf7a7c",
+    "x-envoy-upstream-service-time": "669",
+    "server": "envoy"
+  },
+  "content_type": "application/json",
+  "byte_size": 453,
+  "magic_format": null,
+  "body_json": {
+    "data": {
+      "type": "device-status",
+      "id": "ava1.ring.device.status.EXAMPLE",
+      "attributes": {
+        "reported_at": "2026-10-12T14:17:23Z",
+        "audio": {
+          "snooze": {
+            "active": null,
+            "until": null
+          }
+        },
+        "online": true,
+        "state": null
+      }
+    },
+    "meta": {
+      "time": "2026-10-12T14:24:04Z"
+    }
+  },
+  "raw_body": "{\n  \"data\": {\n    \"type\": \"device-status\",\n    \"id\": \"ava1.ring.device.status.EXAMPLE\",\n    \"attributes\": {\n      \"reported_at\": \"2026-10-12T14:17:23Z\",\n      \"audio\": {\n        \"snooze\": {\n          \"active\": null,\n          \"until\": null\n        }\n      },\n      \"online\": true,\n      \"state\": null\n    }\n  },\n  \"meta\": {\n    \"time\": \"2026-10-12T14:24:04Z\"\n  }\n}",
+  "image_file": null
+}

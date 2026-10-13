@@ -1,0 +1,42 @@
+{
+  "step": "user_profile",
+  "timestamp_utc": "20261012T142406Z",
+  "method": "GET",
+  "url": "https://api.amazonvision.com/v1/users/me",
+  "request_body": null,
+  "status": 200,
+  "error_message": null,
+  "response_headers": {
+    "Date": "Mon, 12 Oct 2026 14:24:08 GMT",
+    "Content-Type": "application/json; charset=utf-8",
+    "Transfer-Encoding": "chunked",
+    "Connection": "close",
+    "x-frame-options": "SAMEORIGIN",
+    "x-xss-protection": "1; mode=block",
+    "x-content-type-options": "nosniff",
+    "x-download-options": "noopen",
+    "x-permitted-cross-domain-policies": "none",
+    "referrer-policy": "strict-origin-when-cross-origin",
+    "x-request-id": "7532f584-2bb0-45d1-8232-cf0a07026a8e",
+    "x-runtime": "0.030462",
+    "vary": "Origin",
+    "x-envoy-upstream-service-time": "615",
+    "server": "envoy"
+  },
+  "content_type": "application/json; charset=utf-8",
+  "byte_size": 323,
+  "magic_format": null,
+  "body_json": {
+    "data": {
+      "type": "users",
+      "id": "ava1.ring.account.EXAMPLE",
+      "attributes": {
+        "last_name": "User",
+        "first_name": "Playground",
+        "email": "devportal_a3ijwlll2mysy_m2cu4bam5gwbwk@example.com"
+      }
+    }
+  },
+  "raw_body": "{\n  \"data\": {\n    \"type\": \"users\",\n    \"id\": \"ava1.ring.account.EXAMPLE\",\n    \"attributes\": {\n      \"last_name\": \"User\",\n      \"first_name\": \"Playground\",\n      \"email\": \"devportal_a3ijwlll2mysy_m2cu4bam5gwbwk@example.com\"\n    }\n  }\n}",
+  "image_file": null
+}

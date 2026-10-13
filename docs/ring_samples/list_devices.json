@@ -1,0 +1,76 @@
+{
+  "step": "list_devices",
+  "timestamp_utc": "20261012T142400Z",
+  "method": "GET",
+  "url": "https://api.amazonvision.com/v1/devices",
+  "request_body": null,
+  "status": 200,
+  "error_message": null,
+  "response_headers": {
+    "Date": "Mon, 12 Oct 2026 14:24:01 GMT",
+    "Content-Type": "application/json",
+    "Transfer-Encoding": "chunked",
+    "Connection": "close",
+    "x-request-id": "d633cb3c-d240-4c00-8e51-720a497700d1",
+    "x-envoy-upstream-service-time": "632",
+    "server": "envoy"
+  },
+  "content_type": "application/json",
+  "byte_size": 2291,
+  "magic_format": null,
+  "body_json": {
+    "data": [
+      {
+        "type": "devices",
+        "id": "ava1.ring.device.EXAMPLE",
+        "attributes": {
+          "name": "Playground Device",
+          "image_url": "https://app-content.ring.com/shared/images/devices/square_device_images/DoorbellPro/rvdp_3x.png"
+        },
+        "relationships": {
+          "location": {
+            "data": {
+              "type": "locations",
+              "id": "ava1.ring.location.EXAMPLE"
+            },
+            "links": {
+              "related": "/v1/devices/ava1.ring.device.EXAMPLE/location"
+            }
+          },
+          "capabilities": {
+            "data": {
+              "type": "device-capabilities",
+              "id": "ava1.ring.device.capabilities.EXAMPLE"
+            },
+            "links": {
+              "related": "/v1/devices/ava1.ring.device.EXAMPLE/capabilities"
+            }
+          },
+          "configurations": {
+            "data": {
+              "type": "device-configurations",
+              "id": "ava1.ring.device.configurations.EXAMPLE"
+            },
+            "links": {
+              "related": "/v1/devices/ava1.ring.device.EXAMPLE/configurations"
+            }
+          },
+          "status": {
+            "data": {
+              "type": "device-status",
+              "id": "ava1.ring.device.status.EXAMPLE"
+            },
+            "links": {
+              "related": "/v1/devices/ava1.ring.device.EXAMPLE/status"
+            }
+          }
+        }
+      }
+    ],
+    "meta": {
+      "time": "2026-10-12T14:24:01Z"
+    }
+  },
+  "raw_body": "{\n  \"data\": [\n    {\n      \"type\": \"devices\",\n      \"id\": \"ava1.ring.device.EXAMPLE\",\n      \"attributes\": {\n        \"name\": \"Playground Device\",\n        \"image_url\": \"https://app-content.ring.com/shared/images/devices/square_device_images/DoorbellPro/rvdp_3x.png\"\n      },\n      \"relationships\": {\n        \"location\": {\n          \"data\": {\n            \"type\": \"locations\",\n            \"id\": \"ava1.ring.location.EXAMPLE\"\n          },\n          \"links\": {\n            \"related\": \"/v1/devices/ava1.ring.device.EXAMPLE/location\"\n          }\n        },\n        \"capabilities\": {\n          \"data\": {\n            \"type\": \"device-capabilities\",\n            \"id\": \"ava1.ring.device.capabilities.EXAMPLE\"\n          },\n          \"links\": {\n            \"related\": \"/v1/devices/ava1.ring.device.EXAMPLE/capabilities\"\n          }\n        },\n        \"configurations\": {\n          \"data\": {\n            \"type\": \"device-configurations\",\n            \"id\": \"ava1.ring.device.configurations.EXAMPLE\"\n          },\n          \"links\": {\n            \"related\": \"/v1/devices/ava1.ring.device.EXAMPLE/configurations\"\n          }\n        },\n        \"status\": {\n          \"data\": {\n            \"type\": \"device-status\",\n            \"id\": \"ava1.ring.device.status.EXAMPLE\"\n          },\n          \"links\": {\n            \"related\": \"/v1/devices/ava1.ring.device.EXAMPLE/status\"\n          }\n        }\n      }\n    }\n  ],\n  \"meta\": {\n    \"time\": \"2026-10-12T14:24:01Z\"\n  }\n}",
+  "image_file": null
+}
