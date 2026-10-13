@@ -919,8 +919,23 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 - **CLI Runner (`src/threshold/__main__.py`)**:
   - Added `run` subcommand (`python3 -m src.threshold run [--db ...] [--poll-interval ...] [--tick-interval ...] [--household ...] [--timezone ...] [--no-poll] [--once]`).
 - **Automated Tests (`tests/test_daemon.py`)**:
-  - 8 automated tests covering defaults, banner rendering, `tick_once()`, `run(max_ticks=N)`, mock polling, `TokenExpired` pause handling, graceful `stop()` signaling, and heartbeat formatting.
-  - Total test suite expanded to **123 tests passing** (115 baseline + 8 daemon tests).
+  - 12 automated tests covering defaults, banner rendering with routine breakdown, `tick_once()`, `run(max_ticks=N)`, mock polling, `TokenExpired` pause handling, hot-reloading refreshed Ring token from `.env`, fast-response caretaker callback polling, `app_state` daemon health tracking, alert box rendering, graceful `stop()` signaling, and heartbeat formatting.
+  - Total test suite expanded to **127 tests passing** (115 baseline + 12 daemon tests).
+
+#### 2. Enhancements & Hardening Applied
+- **Token Hot-Reloading from `.env`:** When Ring token expires (HTTP 401), the daemon pauses polling and checks `.env` on subsequent poll attempts. If a fresh token is pasted into `.env`, the daemon auto-detects it, hot-reloads it into `RingClient`, and immediately resumes polling without requiring a process restart.
+- **Fast-Response Caretaker Callback Polling:** In the inner sleep loop, caretaker callbacks are checked every 2 seconds (`callback_interval_seconds: float = 2.0`). Caretaker clicks on Telegram ("False alarm" / "Got it") dismiss loading spinners within 2s and log prominent confirmation lines to stdout: `[CARETAKER] 📱 Caretaker action received: 'False Alarm Recorded' for routine 'rt_med' (2026-10-13)`.
+- **Prominent Visual Alert Boxes:** When a tick produces escalations or deliveries, formatted alert boxes are displayed on stdout:
+  ```text
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 🚨 PATTERN ABSENCE DETECTED — ESCALATION FIRED              │
+  │ Time:    09:35:00 CDT                                       │
+  │ Details: 1 routine(s) missed expected activity window!     │
+  └─────────────────────────────────────────────────────────────┘
+  ```
+- **Daemon Health Persistence:** Automatically records `daemon_status`, `daemon_started_at`, `daemon_last_tick_at`, and `daemon_last_poll_at` into SQLite `app_state` table for external monitoring and future dashboard visibility.
+- **Detailed Startup Banner:** Displays loaded routine names and scheduled windows directly in the banner.
+
 
 
 
