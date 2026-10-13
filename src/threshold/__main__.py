@@ -93,6 +93,34 @@ def run_ring_check() -> int:
     return 0
 
 
+def run_init_command(args: argparse.Namespace) -> int:
+    """Initialize a threshold.json configuration file from threshold.example.json template."""
+    import shutil
+    template_path = "threshold.example.json"
+    target_path = args.target
+
+    if not os.path.exists(template_path):
+        print(f"ERROR: Template file '{template_path}' not found in current directory.", file=sys.stderr)
+        return 1
+
+    if os.path.exists(target_path) and not args.force:
+        print(f"ERROR: Configuration file '{target_path}' already exists.", file=sys.stderr)
+        print("Use --force to overwrite it with the default template.", file=sys.stderr)
+        return 1
+
+    try:
+        shutil.copyfile(template_path, target_path)
+        print(f"[OK] Created configuration file '{target_path}' from template.")
+        print("\nNext steps:")
+        print(f"  1. Edit '{target_path}' with your household details and Ring device IDs.")
+        print("  2. Run 'python3 -m src.threshold seed' to populate the database.")
+        print("  3. Run 'python3 -m src.threshold run' to start the monitoring service.")
+        return 0
+    except Exception as exc:
+        print(f"ERROR: Failed to create '{target_path}': {exc}", file=sys.stderr)
+        return 1
+
+
 def run_seed_command(args: argparse.Namespace) -> int:
     """Seed routines from declarative configuration file into SQLite database."""
     load_env(".env")
@@ -100,7 +128,7 @@ def run_seed_command(args: argparse.Namespace) -> int:
     config_path = find_config_file(args.config)
     if not config_path:
         print(f"ERROR: Configuration file '{args.config or 'threshold.json'}' not found.", file=sys.stderr)
-        print("Tip: Copy threshold.example.json to threshold.json and customize it with your device IDs.", file=sys.stderr)
+        print("Tip: Run 'python3 -m src.threshold init' to create a starter configuration file.", file=sys.stderr)
         return 1
 
     try:
@@ -118,7 +146,7 @@ def run_seed_command(args: argparse.Namespace) -> int:
             print("[WARN] --verify-devices requested but no RING_ACCESS_TOKEN found in .env.", file=sys.stderr)
 
     conn = init_db(args.db)
-    res = seed_routines_from_config(conn, cfg, client=ring_client)
+    res = seed_routines_from_config(conn, cfg, client=ring_client, purge_unlisted=getattr(args, "purge", False))
 
     print("=" * 80)
     print("THRESHOLD ROUTINE SEEDER")
@@ -135,6 +163,16 @@ def run_seed_command(args: argparse.Namespace) -> int:
         print(f"    Camera:    {cam_info}")
         print(f"    Days:      {', '.join(r.days)}")
         print("-" * 80)
+
+    if res.get("purged_count", 0) > 0:
+        print(f"\nPurged {res['purged_count']} unlisted routine(s): {', '.join(res['purged_routines'])}")
+
+    if res.get("verified_devices"):
+        print("\nVerified Ring Devices:")
+        for dev_id, info in res["verified_devices"].items():
+            st = "ONLINE" if info["online"] else ("OFFLINE" if info["online"] is False else "UNKNOWN")
+            symbol = "✓" if info["online"] else "!"
+            print(f"  [{symbol} {st}] {info['name']} ({dev_id})")
 
     if res.get("warnings"):
         print("\nWarnings:")
@@ -215,6 +253,14 @@ def main() -> int:
     )
     subparsers = parser.add_subparsers(dest="subcommand", help="Available subcommands")
 
+    # init
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Initialize a new threshold.json configuration file from template",
+    )
+    init_parser.add_argument("--target", "-t", default="threshold.json", help="Destination config file path (default: threshold.json)")
+    init_parser.add_argument("--force", "-f", action="store_true", help="Overwrite existing configuration file")
+
     # ring-check
     subparsers.add_parser(
         "ring-check",
@@ -229,6 +275,7 @@ def main() -> int:
     seed_parser.add_argument("--config", "-c", default=None, help="Path to JSON config file (default: threshold.json)")
     seed_parser.add_argument("--db", default="threshold.db", help="Path to SQLite database (default: threshold.db)")
     seed_parser.add_argument("--verify-devices", action="store_true", help="Verify device IDs against Ring Partner API")
+    seed_parser.add_argument("--purge", action="store_true", help="Delete existing routines in DB that are not present in config")
 
     # run (daemon)
     run_parser = subparsers.add_parser(
@@ -246,7 +293,9 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    if args.subcommand == "ring-check":
+    if args.subcommand == "init":
+        return run_init_command(args)
+    elif args.subcommand == "ring-check":
         return run_ring_check()
     elif args.subcommand == "seed":
         return run_seed_command(args)

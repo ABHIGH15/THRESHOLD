@@ -192,12 +192,119 @@ class TestThresholdConfig(unittest.TestCase):
         """Unknown device_id generates non-fatal warnings when client provided."""
         cfg = load_config_file("threshold.example.json")
         mock_client = MockRingDeviceClient(known_ids=["ava1.ring.device.DIFFERENT_DEVICE"])
-
         res = seed_routines_from_config(self.conn, cfg, client=mock_client)  # type: ignore
         self.assertEqual(res["seeded_count"], 2)
         self.assertTrue(len(res["warnings"]) > 0)
         self.assertTrue(any("was not found" in w for w in res["warnings"]))
 
+    def test_validation_zero_duration_window(self):
+        """Identical window_start and window_end raises ValueError (zero-duration window)."""
+        data = {
+            "household": "Test Home",
+            "timezone": "America/Chicago",
+            "routines": [
+                {
+                    "id": "rt_zero",
+                    "name": "Zero Duration",
+                    "device_id": "dev_1",
+                    "window_start": "08:00",
+                    "window_end": "08:00",
+                }
+            ],
+        }
+        with self.assertRaises(ValueError) as ctx:
+            load_config_from_dict(data)
+        self.assertIn("zero-duration", str(ctx.exception).lower())
+
+    def test_env_var_expansion_in_config(self):
+        """Environment variables (${VAR}) in configuration are expanded."""
+        os.environ["TEST_RING_DOORBELL"] = "ava1.ring.device.EXPANDED_DOORBELL"
+        os.environ["TEST_HOUSEHOLD_NAME"] = "Expanded Household"
+        try:
+            data = {
+                "household": "${TEST_HOUSEHOLD_NAME}",
+                "timezone": "America/Chicago",
+                "routines": [
+                    {
+                        "id": "rt_env",
+                        "name": "Doorbell Routine",
+                        "device_id": "${TEST_RING_DOORBELL}",
+                        "window_start": "08:00",
+                        "window_end": "09:00",
+                    }
+                ],
+            }
+            cfg = load_config_from_dict(data)
+            self.assertEqual(cfg.household, "Expanded Household")
+            self.assertEqual(cfg.routines[0].device_id, "ava1.ring.device.EXPANDED_DOORBELL")
+        finally:
+            del os.environ["TEST_RING_DOORBELL"]
+            del os.environ["TEST_HOUSEHOLD_NAME"]
+
+    def test_seed_routines_with_purge_unlisted(self):
+        """purge_unlisted=True removes existing routines from DB that are not in the config."""
+        # First seed with example (morning_medicine, evening_porch)
+        cfg_full = load_config_file("threshold.example.json")
+        seed_routines_from_config(self.conn, cfg_full)
+        self.assertEqual(len(list_routines(self.conn)), 2)
+
+        # Create smaller config with only morning_medicine
+        single_data = {
+            "household": "Test Home",
+            "timezone": "America/Chicago",
+            "routines": [
+                {
+                    "id": "morning_medicine",
+                    "name": "Morning Meds",
+                    "device_id": "dev_1",
+                    "window_start": "07:00",
+                    "window_end": "08:00",
+                }
+            ],
+        }
+        cfg_single = load_config_from_dict(single_data)
+
+        # Seed with purge_unlisted=True
+        res = seed_routines_from_config(self.conn, cfg_single, purge_unlisted=True)
+        self.assertEqual(res["seeded_count"], 1)
+        self.assertEqual(res["purged_count"], 1)
+        self.assertEqual(res["purged_routines"], ["evening_porch"])
+
+        remaining = list_routines(self.conn)
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["routine_id"], "morning_medicine")
+
+    def test_cli_init_command(self):
+        """python3 -m src.threshold init creates config from template and respects force flag."""
+        import argparse
+        from src.threshold.__main__ import run_init_command
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_file = os.path.join(tmpdir, "test_threshold.json")
+            args = argparse.Namespace(target=target_file, force=False)
+
+            # First run: should create file
+            code = run_init_command(args)
+            self.assertEqual(code, 0)
+            self.assertTrue(os.path.exists(target_file))
+
+            # Modify file
+            with open(target_file, "w") as f:
+                f.write('{"custom": true}')
+
+            # Second run without force: should fail
+            code_fail = run_init_command(args)
+            self.assertEqual(code_fail, 1)
+
+            # Third run with force: should succeed and overwrite
+            args.force = True
+            code_force = run_init_command(args)
+            self.assertEqual(code_force, 0)
+            with open(target_file, "r") as f:
+                content = f.read()
+            self.assertIn("Mom's House", content)
+
 
 if __name__ == "__main__":
     unittest.main()
+

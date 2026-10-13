@@ -2,7 +2,7 @@
 Threshold Declarative Configuration Module (src/threshold/config.py).
 
 Provides declarative JSON configuration loading, strict validation,
-routine seeding into SQLite, and Ring device ID verification.
+routine seeding into SQLite, Ring device ID verification, and template initialization.
 Zero external dependencies (pure Python standard library).
 """
 
@@ -22,6 +22,17 @@ logger = logging.getLogger(__name__)
 
 VALID_DAYS: Set[str] = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+def expand_env_vars(val: Any) -> Any:
+    """Recursively expand environment variables (e.g. ${RING_DEV_ID}) in nested structures."""
+    if isinstance(val, str):
+        return os.path.expandvars(val)
+    if isinstance(val, list):
+        return [expand_env_vars(item) for item in val]
+    if isinstance(val, dict):
+        return {k: expand_env_vars(v) for k, v in val.items()}
+    return val
 
 
 @dataclass
@@ -127,6 +138,12 @@ def validate_config(config: ThresholdConfig) -> List[str]:
         validate_time_format(r.window_start, f"routine '{r.id}' window_start")
         validate_time_format(r.window_end, f"routine '{r.id}' window_end")
 
+        # Zero-duration window check
+        if r.window_start == r.window_end:
+            raise ValueError(
+                f"Routine '{r.id}': window_start and window_end cannot be identical ('{r.window_start}') — zero-duration window"
+            )
+
         if r.escalation_delay_minutes < 0:
             raise ValueError(f"Routine '{r.id}': 'escalation_delay_minutes' cannot be negative")
 
@@ -140,8 +157,9 @@ def validate_config(config: ThresholdConfig) -> List[str]:
     return warnings
 
 
-def load_config_from_dict(data: Dict[str, Any]) -> ThresholdConfig:
-    """Construct and validate ThresholdConfig from a dictionary."""
+def load_config_from_dict(raw_data: Dict[str, Any]) -> ThresholdConfig:
+    """Construct and validate ThresholdConfig from a dictionary with env var expansion."""
+    data = expand_env_vars(raw_data)
     routines_raw = data.get("routines", [])
     routines: List[RoutineConfig] = []
 
@@ -222,29 +240,48 @@ def seed_routines_from_config(
     conn: sqlite3.Connection,
     config: ThresholdConfig,
     client: Optional[RingClient] = None,
+    purge_unlisted: bool = False,
 ) -> Dict[str, Any]:
     """
-    Seed or update all routines in SQLite database from ThresholdConfig.
-    Preserves last_satisfied_at and snoozed_until facts if routine already exists.
-    Optionally queries RingClient to verify that referenced device_id exist.
+    Seed or update all routines in SQLite database from ThresholdConfig:
+    - Preserves last_satisfied_at and snoozed_until facts if routine already exists.
+    - If purge_unlisted=True, deletes routines from SQLite that are not in the config.
+    - Optionally queries RingClient to verify device existence and online status.
     """
     warnings: List[str] = []
-    known_devices: Optional[Set[str]] = None
+    verified_devices: Dict[str, Dict[str, Any]] = {}
 
     if client:
         try:
             devices = client.list_devices()
-            known_devices = {d.get("id") for d in devices if d.get("id")}
+            for dev in devices:
+                dev_id = dev.get("id")
+                if not dev_id:
+                    continue
+                attrs = dev.get("attributes", {})
+                dev_name = attrs.get("name", "Ring Device")
+                verified_devices[dev_id] = {
+                    "id": dev_id,
+                    "name": dev_name,
+                    "online": None,
+                }
+                # Check status
+                try:
+                    status_obj = client.get_device_status(dev_id)
+                    s_attrs = status_obj.get("attributes", {})
+                    verified_devices[dev_id]["online"] = bool(s_attrs.get("online", False))
+                except Exception:
+                    pass
         except Exception as e:
             warnings.append(f"Could not verify devices against Ring API: {e}")
 
     seeded_routines: List[str] = []
 
     for r in config.routines:
-        if known_devices is not None:
-            if r.device_id not in known_devices:
+        if verified_devices:
+            if r.device_id not in verified_devices:
                 warnings.append(f"Routine '{r.id}': device_id '{r.device_id}' was not found in discovered Ring devices")
-            if r.snapshot_device_id and r.snapshot_device_id not in known_devices:
+            if r.snapshot_device_id and r.snapshot_device_id not in verified_devices:
                 warnings.append(f"Routine '{r.id}': snapshot_device_id '{r.snapshot_device_id}' was not found in discovered Ring devices")
 
         save_routine(
@@ -264,10 +301,23 @@ def seed_routines_from_config(
         )
         seeded_routines.append(r.id)
 
+    # Purge unlisted routines if requested
+    purged_routines: List[str] = []
+    if purge_unlisted:
+        existing = [row["routine_id"] for row in list_routines(conn)]
+        target_ids = set(seeded_routines)
+        for old_id in existing:
+            if old_id not in target_ids:
+                conn.execute("DELETE FROM routines WHERE routine_id = ?", (old_id,))
+                purged_routines.append(old_id)
+
     conn.commit()
 
     return {
         "seeded_count": len(seeded_routines),
+        "purged_count": len(purged_routines),
+        "purged_routines": purged_routines,
         "routines": seeded_routines,
         "warnings": warnings,
+        "verified_devices": verified_devices,
     }

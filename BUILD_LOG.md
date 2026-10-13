@@ -958,14 +958,28 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
   - 10 automated unit tests covering valid parsing, example file verification, empty household errors, invalid timezones, malformed window formats, duplicate routine IDs, invalid days, store seeding, preserving existing facts, and Ring device verification warnings.
   - Total test suite expanded to **137 tests passing** (127 baseline + 10 config tests).
 
+---
 
+### Priority 2b: Config Enhancements — Init Command, Purge Option, Env Var Expansion, & Zero-Duration Validation
 
+#### 1. Enhancements Implemented
+- **Init CLI Subcommand (`python3 -m src.threshold init [--target ...] [--force]`)**:
+  - Safely initializes a new `threshold.json` configuration file from the reference `threshold.example.json` template.
+  - Protects against accidental overwrites unless `--force` is explicitly specified.
+- **Unlisted Routine Purging (`--purge` flag & `purge_unlisted` parameter)**:
+  - Added `purge_unlisted: bool = False` to `seed_routines_from_config()`.
+  - When invoked with `--purge`, deletes obsolete routine rows from SQLite that are no longer declared in the config file, returning detailed counts and purged routine IDs.
+- **Recursive Environment Variable Expansion (`expand_env_vars`)**:
+  - Automatically expands `${ENV_VAR}` references throughout the JSON structure (e.g., household names, Ring device IDs, snapshot camera IDs) via `os.path.expandvars`, enabling secret-free configuration versioning.
+- **Zero-Duration Window Validation**:
+  - Explicitly rejects routines where `window_start == window_end` with an informative `ValueError` ("zero-duration window"), preventing misconfigurations while allowing overnight cross-midnight windows (`22:00` to `06:00`).
+- **Enhanced Ring Device Status Reporting**:
+  - In `seed_routines_from_config()`, collects both online/offline health status and friendly device names into `verified_devices` and renders an intuitive summary (`[✓ ONLINE] Front Doorbell (...)` vs `[! OFFLINE] ...`).
 
-
-
-
-
-
-
-
-
+#### 2. Automated Test Verification
+- Added 4 new tests in `tests/test_config.py`:
+  - `test_validation_zero_duration_window`: Verifies rejection of identical start/end window times.
+  - `test_env_var_expansion_in_config`: Verifies recursive expansion of `${VAR}` tokens.
+  - `test_seed_routines_with_purge_unlisted`: Verifies removal of orphaned routine rows from SQLite when `--purge` is enabled.
+  - `test_cli_init_command`: Verifies template copy, overwrite protection, and `--force` overwrite.
+- **Total Test Suite:** **141 tests passing** (`python3 -m unittest discover tests -v`) with 0 external dependencies (pure Python standard library).
