@@ -340,6 +340,137 @@ Commands run and verbatim output:
 Expected: PRIMARY KEY columns reject NULL; snooze stored in single place on routines; 56 tests green.
 Actual: Matched expected on all counts.
 Result: PASS.
-Status: STOPPED. Ready for Task A3 (Webhook server).
+Status: A2b Complete.
+
+### [2026-10-13T07:45:00Z] A3 — Shared Ingest & Webhook Server (IN PROGRESS)
+
+#### Official Ring Webhook v1.1 Payload Documentation (Verbatim from Amazon Docs):
+Source: `https://developer.amazon.com/docs/ring/api-documentation.html#notifications` & `#motion-detection`
+
+```json
+{
+  "meta": {
+    "version": "1.1",
+    "time": "2026-02-13T13:39:57.200155525Z",
+    "request_id": "2ad45ade-1818-4154-813b-afdd8bcd8085",
+    "account_id": "ava1.ring.account.XXXYYY"
+  },
+  "data": {
+    "id": "<device_id>_motion_<timestamp>",
+    "type": "motion_detected",
+    "attributes": {
+      "source": "<device_id>",
+      "source_type": "devices",
+      "timestamp": 1786715596787,
+      "timestamp_readable": "2026-08-14 08:53:16",
+      "sub_type": "motion",
+      "component_ids": ["0"]
+    },
+    "relationships": {
+      "devices": {
+        "links": {
+          "self": "/v1/devices/<device_id>"
+        }
+      }
+    }
+  }
+}
+```
+
+**Field locations confirmed from official documentation:**
+- **Event Type:** `data.type` (e.g. `motion_detected`, `button_press`, `device_online`, `device_offline`).
+- **Idempotency Key / External ID:** `meta.request_id` (or `data.id`).
+- **Device ID:** `data.attributes.source` (or `data.relationships.devices...`).
+- **Timestamp:** `data.attributes.timestamp` (epoch milliseconds integer, e.g. `1786715596787`).
+- **Sub Type:** `data.attributes.sub_type` (docs note: "sub_type is returned inside attributes — read it as `data.attributes.sub_type`, not `data.subType`"). Values: `human`, `vehicle`, `package_delivery`, `motion`, `other_motion`.
+
+#### Official Snapshot API Request Body (Verbatim from Amazon Docs):
+Source: `https://developer.amazon.com/docs/ring/api-documentation.html#image-snapshots`
+```json
+{
+  "type": "at_timestamp",
+  "timestamp": 1787176751000,
+  "image_options": {
+    "format": "jpeg",
+    "resolution": { "width": 1920, "height": 1080 }
+  },
+  "components": [
+    { "component_id": "1" }
+  ]
+}
+```
+*(Single-camera devices do not require `components`). Flow returns `303 See Other` with `Location` header to pre-signed binary URL.*
+
+### [2026-10-13T13:30:00Z] Task A3 — Shared Ingest & Webhook Server (COMPLETE)
+
+#### 1. Unit 1: Shared Ingest Pipeline (`src/threshold/ingest.py`)
+- Created `ingest_event()` as the unified entry point for all event sources (`webhook`, `history`, `simulator`).
+- Performs:
+  1. Idempotent insertion into `events` table on `(source, external_id)`.
+  2. If `event_type` is `device_online` or `device_offline`, calls `upsert_device_health()`.
+  3. If event matches a registered routine (`device_id`, `expected_event_type`, and matching `sub_type`), advances `routines.last_satisfied_at` if the event is newer.
+- Tested in `tests/test_ingest.py` (5 unit tests covering duplicate delivery, health flip, last_satisfied advancement, older event preservation, non-matching routines).
+
+#### 2. Unit 2: Webhook Server (`src/threshold/server.py`) & Sender CLI (`scripts/send_signed_event.py`)
+- `src/threshold/server.py`:
+  - Standard library only: `http.server.ThreadingHTTPServer`, `threading`, `json`, `os`, `sys`, `urllib.parse`.
+  - Binds to `127.0.0.1` (configurable via `THRESHOLD_PORT`, default 8080).
+  - Enforces `MAX_BODY_BYTES = 1 MB` limit; drains and rejects oversized payloads with HTTP 413.
+  - Verifies HMAC-SHA256 signature (`X-Signature: sha256=<hex>`) **BEFORE** JSON parsing on raw request body bytes.
+  - Fast response time (< 5 ms, well under the 5-second constraint).
+  - Storage failures are NOT swallowed: returns HTTP 500 on database or storage failure.
+  - Endpoints: `POST /webhooks/ring` (ingest), `GET /healthz` (`{"status": "ok"}`).
+- `scripts/send_signed_event.py`:
+  - CLI utility to test/simulate Ring events with HMAC signature computed from environment variable (`RING_WEBHOOK_SECRET`).
+  - Never accepts secret as a CLI flag.
+
+#### 3. Test Suite Verification (`tests/test_server.py`)
+Ran full integration suite on ephemeral port 0 with live background server:
+1. `test_valid_signature_200_and_one_row` -> 200 OK, exactly 1 row in `events`.
+2. `test_corrupted_signature_401_zero_rows` -> 401 Unauthorized, 0 rows in `events`.
+3. `test_missing_signature_header_401` -> 401 Unauthorized.
+4. `test_replay_attack_duplicate_delivery_one_row` -> 200 OK, exactly 1 row (idempotent).
+5. `test_malformed_json_with_valid_signature_400` -> 400 Bad Request, HMAC verified first.
+6. `test_body_too_large_413` -> 413 Payload Too Large.
+7. `test_forced_storage_failure_returns_500` -> 500 Internal Server Error (verifies errors are never swallowed).
+8. `test_measured_response_time_under_five_seconds` -> Measured response time: 1.75 ms (< 5000 ms limit).
+9. `test_device_offline_event_updates_device_health` -> `device_health` updated to `online=0`.
+10. `test_matching_motion_event_advances_last_satisfied_at` -> routine `last_satisfied_at` advanced.
+11. `test_healthz_endpoint` -> 200 OK `{"status": "ok"}`.
+
+**Full Test Suite Run:**
+`python3 -m unittest discover tests -v`
+**72 tests in 5.671s — all passing** (56 baseline + 5 ingest + 11 server).
+
+#### 4. Manual curl Transcript (Verbatim Output)
+```text
+Starting Threshold Webhook Server on 127.0.0.1:8899
+
+=== 1. CURL WITH VALID SIGNATURE ===
+HTTP/1.0 200 OK
+Server: BaseHTTP/0.6 Python/3.14.7
+Date: Tue, 13 Oct 2026 07:47:53 GMT
+Content-Type: application/json
+Content-Length: 23
+
+{"status": "received"}
+
+=== SQLITE3 ROW COUNT AFTER VALID CURL ===
+1|webhook|demo_req_001|front_door|motion_detected
+
+=== 2. CURL WITH CORRUPTED SIGNATURE ===
+HTTP/1.0 401 Unauthorized
+Server: BaseHTTP/0.6 Python/3.14.7
+Date: Tue, 13 Oct 2026 07:47:53 GMT
+Content-Type: application/json
+Content-Length: 82
+
+{"error": "Unauthorized: Signature mismatch — request may not be from Ring"}
+
+=== SQLITE3 ROW COUNT AFTER CORRUPTED CURL (SHOULD STILL BE 1) ===
+1
+```
+
+
 
 
