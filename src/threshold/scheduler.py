@@ -147,6 +147,7 @@ def row_to_routine(row: Dict[str, Any]) -> Routine:
         snoozed_until=snooze_dt,
     )
     routine.routine_id = row["routine_id"]  # Attach routine_id for convenience
+    routine.snapshot_device_id = row.get("snapshot_device_id")
     return routine
 
 

@@ -1,0 +1,36 @@
+{
+  "household": "Mom's House — Dallas",
+  "timezone": "America/Chicago",
+  "poll_interval_seconds": 300,
+  "tick_interval_seconds": 60,
+  "callback_interval_seconds": 2,
+  "dashboard_port": 8080,
+  "routines": [
+    {
+      "id": "morning_medicine",
+      "name": "Morning Medicine Cabinet",
+      "property_id": "prop_mom_dallas",
+      "device_id": "ava1.ring.device.EXAMPLE_CABINET_SENSOR",
+      "expected_event_type": "motion",
+      "expected_sub_type": null,
+      "window_start": "07:00",
+      "window_end": "09:00",
+      "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+      "escalation_delay_minutes": 30,
+      "snapshot_device_id": "ava1.ring.device.EXAMPLE_KITCHEN_CAM"
+    },
+    {
+      "id": "evening_porch",
+      "name": "Evening Porch Walk",
+      "property_id": "prop_mom_dallas",
+      "device_id": "ava1.ring.device.EXAMPLE_FRONT_DOORBELL",
+      "expected_event_type": "motion",
+      "expected_sub_type": null,
+      "window_start": "17:00",
+      "window_end": "19:00",
+      "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+      "escalation_delay_minutes": 30,
+      "snapshot_device_id": "ava1.ring.device.EXAMPLE_FRONT_DOORBELL"
+    }
+  ]
+}

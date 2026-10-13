@@ -936,6 +936,29 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 - **Daemon Health Persistence:** Automatically records `daemon_status`, `daemon_started_at`, `daemon_last_tick_at`, and `daemon_last_poll_at` into SQLite `app_state` table for external monitoring and future dashboard visibility.
 - **Detailed Startup Banner:** Displays loaded routine names and scheduled windows directly in the banner.
 
+---
+
+### Priority 2: Declarative Configuration (`threshold.json`) & Seed Command
+
+#### 1. Components Delivered
+- **`src/threshold/config.py`**:
+  - `ThresholdConfig` & `RoutineConfig`: Strict declarative dataclasses capturing household details, timezone, polling/tick intervals, and daily routine schedules.
+  - Validation engine: Validates 24-hour `HH:MM` time formats (`00:00`–`23:59`), timezone existence (`zoneinfo.ZoneInfo`), unique non-empty routine IDs, non-negative escalation delays, and day vocabularies (`mon`–`sun`).
+  - `load_config_file(filepath)` & `find_config_file(path)`: Pure standard library JSON loaders with informative error reporting.
+  - `seed_routines_from_config(conn, config, client=None)`: Inserts/updates all routines into SQLite. Uses `COALESCE` to preserve existing runtime facts (`last_satisfied_at`, `snoozed_until`) on re-seeding. Optionally checks referenced device IDs against Ring Partner API devices, generating warnings without terminating execution.
+- **Store & Model Enhancement**:
+  - Added `snapshot_device_id TEXT` column to `routines` table, `SCHEMA_SQL`, `init_db()` migration, and `save_routine()` in `src/threshold/store.py`.
+  - Updated `Routine` and `row_to_routine` in `src/threshold/scheduler.py` to propagate `snapshot_device_id`.
+- **Reference Household File (`threshold.example.json`)**:
+  - Committed example configuration modeling an elderly care home ("Mom's House — Dallas") with Morning Medicine and Evening Porch Walk routines.
+- **CLI Commands (`src/threshold/__main__.py`)**:
+  - `seed` subcommand (`python3 -m src.threshold seed [--config ...] [--db ...] [--verify-devices]`): Seeds routines and renders a formatted terminal summary.
+  - Enhanced `run` subcommand: Automatically locates and loads `threshold.json` (or specified `--config`), auto-seeds routines, and allows CLI arguments to override config file defaults.
+- **Automated Tests (`tests/test_config.py`)**:
+  - 10 automated unit tests covering valid parsing, example file verification, empty household errors, invalid timezones, malformed window formats, duplicate routine IDs, invalid days, store seeding, preserving existing facts, and Ring device verification warnings.
+  - Total test suite expanded to **137 tests passing** (127 baseline + 10 config tests).
+
+
 
 
 

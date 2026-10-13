@@ -12,10 +12,11 @@ import os
 import sys
 
 from scripts.probe_ring import load_env
+from src.threshold.config import find_config_file, load_config_file, seed_routines_from_config, ThresholdConfig
 from src.threshold.daemon import DaemonConfig, ThresholdDaemon
 from src.threshold.notifier import ConsoleNotifier, TelegramNotifier
 from src.threshold.ring_client import RingAPIError, RingClient, TokenExpired
-from src.threshold.store import ms_to_iso
+from src.threshold.store import init_db, ms_to_iso
 
 
 def run_ring_check() -> int:
@@ -92,9 +93,85 @@ def run_ring_check() -> int:
     return 0
 
 
+def run_seed_command(args: argparse.Namespace) -> int:
+    """Seed routines from declarative configuration file into SQLite database."""
+    load_env(".env")
+
+    config_path = find_config_file(args.config)
+    if not config_path:
+        print(f"ERROR: Configuration file '{args.config or 'threshold.json'}' not found.", file=sys.stderr)
+        print("Tip: Copy threshold.example.json to threshold.json and customize it with your device IDs.", file=sys.stderr)
+        return 1
+
+    try:
+        cfg = load_config_file(config_path)
+    except Exception as exc:
+        print(f"ERROR: Failed to load configuration '{config_path}': {exc}", file=sys.stderr)
+        return 1
+
+    ring_client = None
+    if args.verify_devices:
+        token = os.environ.get("RING_ACCESS_TOKEN") or os.environ.get("RING_TOKEN")
+        if token and token.strip():
+            ring_client = RingClient(access_token=token.strip())
+        else:
+            print("[WARN] --verify-devices requested but no RING_ACCESS_TOKEN found in .env.", file=sys.stderr)
+
+    conn = init_db(args.db)
+    res = seed_routines_from_config(conn, cfg, client=ring_client)
+
+    print("=" * 80)
+    print("THRESHOLD ROUTINE SEEDER")
+    print("=" * 80)
+    print(f"Config:    {config_path} (Household: {cfg.household}, TZ: {cfg.timezone})")
+    print(f"Database:  {args.db}")
+    print(f"\nSeeded {res['seeded_count']} routine(s):\n")
+
+    for idx, r in enumerate(cfg.routines, start=1):
+        cam_info = f"Snapshot: {r.snapshot_device_id}" if r.snapshot_device_id else "Snapshot: (Primary sensor)"
+        print(f"[{idx}] {r.name} (id: {r.id})")
+        print(f"    Window:    {r.window_start} – {r.window_end} (+{r.escalation_delay_minutes}m delay)")
+        print(f"    Device:    {r.device_id}")
+        print(f"    Camera:    {cam_info}")
+        print(f"    Days:      {', '.join(r.days)}")
+        print("-" * 80)
+
+    if res.get("warnings"):
+        print("\nWarnings:")
+        for w in res["warnings"]:
+            print(f"  [WARN] {w}")
+
+    print(f"\nSuccessfully seeded {res['seeded_count']} routine(s) into {args.db}!")
+    conn.close()
+    return 0
+
+
 def run_daemon_command(args: argparse.Namespace) -> int:
     """Execute daemon background service."""
     load_env(".env")
+
+    # Check for config file to auto-populate defaults
+    cfg: Optional[ThresholdConfig] = None
+    config_path = find_config_file(args.config)
+    if config_path:
+        try:
+            cfg = load_config_file(config_path)
+            print(f"[CONFIG] Loaded household configuration from '{config_path}'")
+        except Exception as exc:
+            print(f"[WARN] Failed to load config file '{config_path}': {exc}", file=sys.stderr)
+
+    # CLI args override config file if explicitly provided, else use config file, else defaults
+    household = args.household if args.household is not None else (cfg.household if cfg else "Threshold Household")
+    timezone_name = args.timezone if args.timezone is not None else (cfg.timezone if cfg else "America/Chicago")
+    poll_interval = args.poll_interval if args.poll_interval is not None else (cfg.poll_interval_seconds if cfg else 300.0)
+    tick_interval = args.tick_interval if args.tick_interval is not None else (cfg.tick_interval_seconds if cfg else 60.0)
+    cb_interval = cfg.callback_interval_seconds if cfg else 2.0
+
+    conn = init_db(args.db)
+
+    # Auto-seed routines from config if config was loaded
+    if cfg and cfg.routines:
+        seed_routines_from_config(conn, cfg)
 
     # Ring Client setup
     token = os.environ.get("RING_ACCESS_TOKEN") or os.environ.get("RING_TOKEN")
@@ -112,10 +189,11 @@ def run_daemon_command(args: argparse.Namespace) -> int:
 
     config = DaemonConfig(
         db_path=args.db,
-        poll_interval_seconds=float(args.poll_interval),
-        tick_interval_seconds=float(args.tick_interval),
-        household_name=args.household,
-        timezone_name=args.timezone,
+        poll_interval_seconds=float(poll_interval),
+        tick_interval_seconds=float(tick_interval),
+        callback_interval_seconds=float(cb_interval),
+        household_name=household,
+        timezone_name=timezone_name,
         enable_polling=not args.no_poll,
     )
 
@@ -123,6 +201,7 @@ def run_daemon_command(args: argparse.Namespace) -> int:
         config=config,
         ring_client=ring_client,
         notifier=notifier,
+        conn=conn,
     )
 
     max_ticks = 1 if args.once else None
@@ -142,16 +221,26 @@ def main() -> int:
         help="Check Ring Partner API devices, status, and recent event history",
     )
 
+    # seed
+    seed_parser = subparsers.add_parser(
+        "seed",
+        help="Seed routines from declarative JSON configuration into SQLite database",
+    )
+    seed_parser.add_argument("--config", "-c", default=None, help="Path to JSON config file (default: threshold.json)")
+    seed_parser.add_argument("--db", default="threshold.db", help="Path to SQLite database (default: threshold.db)")
+    seed_parser.add_argument("--verify-devices", action="store_true", help="Verify device IDs against Ring Partner API")
+
     # run (daemon)
     run_parser = subparsers.add_parser(
         "run",
         help="Run the Threshold background service daemon",
     )
+    run_parser.add_argument("--config", "-c", default=None, help="Path to JSON config file (default: threshold.json if exists)")
     run_parser.add_argument("--db", default="threshold.db", help="Path to SQLite database (default: threshold.db)")
-    run_parser.add_argument("--poll-interval", type=float, default=300.0, help="Ring poll interval in seconds (default: 300)")
-    run_parser.add_argument("--tick-interval", type=float, default=60.0, help="Scheduler tick interval in seconds (default: 60)")
-    run_parser.add_argument("--household", default="Threshold Household", help="Household name for dashboard/alerts")
-    run_parser.add_argument("--timezone", default="America/Chicago", help="Local timezone name (default: America/Chicago)")
+    run_parser.add_argument("--poll-interval", type=float, default=None, help="Ring poll interval in seconds (default: 300)")
+    run_parser.add_argument("--tick-interval", type=float, default=None, help="Scheduler tick interval in seconds (default: 60)")
+    run_parser.add_argument("--household", default=None, help="Household name (overrides config)")
+    run_parser.add_argument("--timezone", default=None, help="Local timezone name (overrides config)")
     run_parser.add_argument("--no-poll", action="store_true", help="Disable Ring API polling (scheduler only)")
     run_parser.add_argument("--once", action="store_true", help="Execute single cycle and exit")
 
@@ -159,6 +248,8 @@ def main() -> int:
 
     if args.subcommand == "ring-check":
         return run_ring_check()
+    elif args.subcommand == "seed":
+        return run_seed_command(args)
     elif args.subcommand == "run":
         return run_daemon_command(args)
     else:

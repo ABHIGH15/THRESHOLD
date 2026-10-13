@@ -100,7 +100,8 @@ CREATE TABLE IF NOT EXISTS routines (
     days TEXT NOT NULL,
     escalation_delay_minutes INTEGER NOT NULL DEFAULT 30,
     last_satisfied_at TEXT,
-    snoozed_until TEXT
+    snoozed_until TEXT,
+    snapshot_device_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS escalations (
@@ -148,6 +149,10 @@ def init_db(conn_or_path: Optional[Union[sqlite3.Connection, str]] = None) -> sq
         pass
     try:
         conn.execute("ALTER TABLE escalations ADD COLUMN reminded_at TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE routines ADD COLUMN snapshot_device_id TEXT;")
     except sqlite3.OperationalError:
         pass
     try:
@@ -270,6 +275,7 @@ def save_routine(
     escalation_delay_minutes: int = 30,
     last_satisfied_at: Optional[Union[int, float, str, datetime]] = None,
     snoozed_until: Optional[Union[int, float, str, datetime]] = None,
+    snapshot_device_id: Optional[str] = None,
 ) -> None:
     """Save or update routine configuration."""
     days_str = days if isinstance(days, str) else json.dumps(days)
@@ -280,8 +286,8 @@ def save_routine(
     INSERT INTO routines (
         routine_id, property_id, name, device_id, expected_event_type, expected_sub_type,
         window_start, window_end, timezone, days, escalation_delay_minutes,
-        last_satisfied_at, snoozed_until
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        last_satisfied_at, snoozed_until, snapshot_device_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(routine_id) DO UPDATE SET
         property_id = excluded.property_id,
         name = excluded.name,
@@ -293,8 +299,9 @@ def save_routine(
         timezone = excluded.timezone,
         days = excluded.days,
         escalation_delay_minutes = excluded.escalation_delay_minutes,
-        last_satisfied_at = excluded.last_satisfied_at,
-        snoozed_until = excluded.snoozed_until
+        last_satisfied_at = COALESCE(excluded.last_satisfied_at, routines.last_satisfied_at),
+        snoozed_until = COALESCE(excluded.snoozed_until, routines.snoozed_until),
+        snapshot_device_id = excluded.snapshot_device_id
     """
     conn.execute(
         sql,
@@ -312,6 +319,7 @@ def save_routine(
             escalation_delay_minutes,
             sat_iso,
             snooze_iso,
+            snapshot_device_id,
         ),
     )
     conn.commit()
