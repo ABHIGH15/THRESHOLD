@@ -105,7 +105,9 @@ class ThresholdDaemon:
             self._owns_conn = True
 
         self.ring_client = ring_client
-        self.notifier = notifier or ConsoleNotifier()
+        self.notifier = notifier or ConsoleNotifier(ring_client=ring_client)
+        if self.ring_client and hasattr(self.notifier, "ring_client") and not getattr(self.notifier, "ring_client", None):
+            self.notifier.ring_client = self.ring_client
 
         self.shutdown_requested = False
         self.polling_paused = False

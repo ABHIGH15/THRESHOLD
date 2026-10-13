@@ -68,6 +68,7 @@ class Routine:
     escalation_delay_minutes: int = 30  # how long past window_end before firing
     last_satisfied_at: Optional[datetime] = None  # written by webhook path
     snoozed_until: Optional[datetime] = None  # written by caretaker action
+    snapshot_device_id: Optional[str] = None  # camera device for snapshot-enriched alerts
 
 
 @dataclass

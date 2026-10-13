@@ -983,3 +983,39 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
   - `test_seed_routines_with_purge_unlisted`: Verifies removal of orphaned routine rows from SQLite when `--purge` is enabled.
   - `test_cli_init_command`: Verifies template copy, overwrite protection, and `--force` overwrite.
 - **Total Test Suite:** **141 tests passing** (`python3 -m unittest discover tests -v`) with 0 external dependencies (pure Python standard library).
+
+---
+
+### Priority 3: Snapshot-Enriched Telegram Alerts (`sendPhoto` with Multipart Uploads)
+
+#### 1. Components Delivered
+- **`encode_multipart_form_data` (stdlib only in `src/threshold/notifier.py`)**:
+  - Implements canonical RFC 7578 / RFC 2046 `multipart/form-data` encoding using standard library only (`uuid`, `typing`).
+  - Supports string form fields and binary file uploads with individual `Content-Disposition` and `Content-Type` headers.
+- **Telegram Bot API `sendPhoto` Integration**:
+  - Added `_make_multipart_request(endpoint, fields, files)` with token redaction on HTTP errors.
+  - Added `send_photo(photo_bytes, caption, reply_markup, filename="snapshot.jpg")`: delivers live JPEG snapshots to Telegram with HTML formatting and inline keyboards (`['False alarm', 'Got it']`).
+- **Snapshot Enrichment Pipeline in `send_escalation()` & `send_reminder()`**:
+  - Queries `routine.snapshot_device_id` (falling back to `routine.device_id`).
+  - When `RingClient` is attached, retrieves live image bytes via `RingClient.get_snapshot(device_id, timestamp_ms=now)` and sends photo alert.
+  - **Zero Alert Drops / Fail-Safe Degradation**: If snapshot capture fails (`MediaUnavailable`, token expiration, timeout, or HTTP error on `sendPhoto`), immediately logs warning and falls back to `sendMessage` text delivery without delaying or dropping the escalation alert.
+- **Console Notifier Enhancement**:
+  - `ConsoleNotifier` accepts `ring_client` and outputs `Snapshot Camera: <id>` when configured on routine.
+- **Daemon & CLI Wiring**:
+  - `ThresholdDaemon` automatically injects its configured `RingClient` into `TelegramNotifier` and `ConsoleNotifier`.
+  - Token hot-reloading preserves the `RingClient` reference on `TelegramNotifier`.
+  - CLI `run` subcommand configures `TelegramNotifier(..., ring_client=ring_client)`.
+- **Model Update**:
+  - Added `snapshot_device_id: Optional[str] = None` directly to `Routine` dataclass in `src/threshold/models.py`.
+
+#### 2. Automated Test Verification
+- Added 7 new integration and unit tests in `tests/test_notifier.py`:
+  - `test_encode_multipart_form_data`: Verifies boundary delimiters, headers, text values, and binary integrity.
+  - `test_send_photo_with_multipart`: Verifies multipart POST to Telegram mock server `/sendPhoto` with caption and inline keyboard buttons.
+  - `test_send_escalation_with_snapshot_enrichment`: Verifies that configured camera triggers `get_snapshot` and delivers `sendPhoto` with JPEG bytes and inline buttons.
+  - `test_send_escalation_falls_back_to_text_when_snapshot_unavailable`: Verifies graceful fallback to `sendMessage` when Ring raises `MediaUnavailable`.
+  - `test_send_escalation_falls_back_to_text_when_send_photo_fails`: Verifies graceful fallback to `sendMessage` when Telegram `/sendPhoto` returns 500 error.
+  - `test_token_redacted_in_multipart_failure`: Verifies Telegram bot token is redacted in exception messages during multipart failure.
+  - `test_console_notifier_displays_snapshot_device`: Verifies console output contains snapshot camera ID.
+- **Total Test Suite:** **148 tests passing** (`python3 -m unittest discover tests -v`) in $\approx 23.7$ seconds with 0 third-party pip dependencies.
+

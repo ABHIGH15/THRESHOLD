@@ -27,8 +27,10 @@ from src.threshold.notifier import (
     Notifier,
     RecordingNotifier,
     TelegramNotifier,
+    encode_multipart_form_data,
     redact_telegram_token,
 )
+from src.threshold.ring_client import MediaUnavailable
 from src.threshold.scheduler import FakeClock, Scheduler, run_scheduler_tick
 from src.threshold.store import (
     ack_escalation,
@@ -54,13 +56,26 @@ class FakeTelegramHandler(http.server.BaseHTTPRequestHandler):
         server = self.server
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length)
-        payload = json.loads(body.decode("utf-8")) if body else {}
+        content_type = self.headers.get("Content-Type", "")
+        if "application/json" in content_type and body:
+            payload = json.loads(body.decode("utf-8"))
+        else:
+            payload = {}
 
         server.requests_log.append({
             "path": self.path,
             "headers": dict(self.headers),
             "payload": payload,
+            "body": body,
         })
+
+        if getattr(server, "fail_send_photo_with_500", False) and self.path.endswith("/sendPhoto"):
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            resp = json.dumps({"ok": False, "error_code": 500, "description": "SendPhoto Failed"}).encode("utf-8")
+            self.wfile.write(resp)
+            return
 
         if getattr(server, "fail_with_500", False):
             self.send_response(500)
@@ -78,6 +93,20 @@ class FakeTelegramHandler(http.server.BaseHTTPRequestHandler):
             resp = json.dumps({
                 "ok": True,
                 "result": {"message_id": 999, "date": 123456789, "chat": payload.get("chat_id")},
+            }).encode("utf-8")
+            self.wfile.write(resp)
+
+        elif self.path.endswith("/sendPhoto"):
+            server.sent_photos.append({
+                "headers": dict(self.headers),
+                "body": body,
+            })
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            resp = json.dumps({
+                "ok": True,
+                "result": {"message_id": 1000, "date": 123456789, "photo": []},
             }).encode("utf-8")
             self.wfile.write(resp)
 
@@ -145,10 +174,12 @@ class TestNotifierSystem(unittest.TestCase):
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeTelegramHandler)
         self.server.requests_log = []
         self.server.sent_messages = []
+        self.server.sent_photos = []
         self.server.queued_updates = []
         self.server.answered_callbacks = []
         self.server.requested_offsets = []
         self.server.fail_with_500 = False
+        self.server.fail_send_photo_with_500 = False
 
         self.port = self.server.server_address[1]
         self.base_url = f"http://127.0.0.1:{self.port}"
@@ -802,6 +833,200 @@ class TestNotifierSystem(unittest.TestCase):
         self.assertGreaterEqual(len(get_updates_reqs), 1)
         last_req = get_updates_reqs[-1]
         self.assertEqual(last_req["payload"].get("timeout"), 0, "Scheduler tick must use timeout=0 for getUpdates")
+
+    # 15. Priority 3: Multipart encoding & sendPhoto tests
+    def test_encode_multipart_form_data(self):
+        """encode_multipart_form_data formats string fields and binary files into standard multipart."""
+        fields = {"chat_id": "12345", "caption": "Hello World"}
+        files = {"photo": ("test.jpg", b"\xFF\xD8\xFF\xE0JFIF_TEST", "image/jpeg")}
+        boundary = "CustomTestBoundary123"
+
+        body, ctype = encode_multipart_form_data(fields, files, boundary=boundary)
+
+        self.assertEqual(ctype, "multipart/form-data; boundary=CustomTestBoundary123")
+        self.assertTrue(body.startswith(b"--CustomTestBoundary123\r\n"))
+        self.assertTrue(body.endswith(b"--CustomTestBoundary123--\r\n"))
+        self.assertIn(b'name="chat_id"\r\n\r\n12345\r\n', body)
+        self.assertIn(b'name="caption"\r\n\r\nHello World\r\n', body)
+        self.assertIn(b'name="photo"; filename="test.jpg"\r\n', body)
+        self.assertIn(b"Content-Type: image/jpeg\r\n\r\n\xff\xd8\xff\xe0JFIF_TEST\r\n", body)
+
+    def test_send_photo_with_multipart(self):
+        """send_photo executes multipart POST to Telegram /sendPhoto endpoint with inline buttons."""
+        notifier = TelegramNotifier(bot_token="tok_photo", chat_id="5551234", base_url=self.base_url)
+        keyboard = {
+            "inline_keyboard": [[{"text": "False alarm", "callback_data": "fa:1"}, {"text": "Got it", "callback_data": "ak:1"}]]
+        }
+        test_jpeg = b"\xFF\xD8\xFF\xFE_MOCK_IMAGE_BYTES_"
+
+        res = notifier.send_photo(
+            photo_bytes=test_jpeg,
+            caption="🚨 <b>Alert: Morning Window Missed</b>",
+            reply_markup=keyboard,
+        )
+
+        self.assertEqual(len(self.server.sent_photos), 1)
+        received = self.server.sent_photos[0]
+        body = received["body"]
+        self.assertIn(b"_MOCK_IMAGE_BYTES_", body)
+        self.assertIn(b"Morning Window Missed", body)
+        self.assertIn(b"False alarm", body)
+        self.assertIn(b"Got it", body)
+        self.assertIn("multipart/form-data", received["headers"].get("Content-Type", ""))
+
+    def test_send_escalation_with_snapshot_enrichment(self):
+        """Escalation with configured camera fetches Ring snapshot and delivers sendPhoto with inline buttons."""
+        mock_ring = MockRingSnapshotClient(snapshot_data=b"\xFF\xD8\xFF\xFE_LIVE_RING_SNAPSHOT_JPEG_")
+        notifier = TelegramNotifier(
+            bot_token="tok_live_esc",
+            chat_id="5551234",
+            base_url=self.base_url,
+            ring_client=mock_ring,
+        )
+
+        routine_with_cam = Routine(
+            property_id="prop_1",
+            name="Morning Medicine",
+            device_id="sensor_cabinet",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone="America/Chicago",
+            days=["mon", "tue", "wed", "thu", "fri"],
+            escalation_delay_minutes=30,
+            snapshot_device_id="cam_kitchen_counter",
+        )
+        routine_with_cam.routine_id = "rt_medicine"
+
+        notifier.send_escalation(
+            routine=routine_with_cam,
+            local_date="2026-10-12",
+            fired_at="2026-10-12T14:35:00Z",
+        )
+
+        # Snapshot was requested from camera device
+        self.assertEqual(mock_ring.requested_devices, ["cam_kitchen_counter"])
+
+        # Photo was sent, NOT text message
+        self.assertEqual(len(self.server.sent_photos), 1)
+        self.assertEqual(len(self.server.sent_messages), 0)
+
+        photo_body = self.server.sent_photos[0]["body"]
+        self.assertIn(b"_LIVE_RING_SNAPSHOT_JPEG_", photo_body)
+        self.assertIn(b"THRESHOLD ESCALATION", photo_body)
+        self.assertIn(b"Morning Medicine", photo_body)
+        self.assertIn(b"False alarm", photo_body)
+        self.assertIn(b"Got it", photo_body)
+
+    def test_send_escalation_falls_back_to_text_when_snapshot_unavailable(self):
+        """When RingClient.get_snapshot raises MediaUnavailable, falls back cleanly to sendMessage."""
+        mock_ring = MockRingSnapshotClient(raise_error=MediaUnavailable("Camera offline / recording not ready"))
+        notifier = TelegramNotifier(
+            bot_token="tok_fallback",
+            chat_id="5551234",
+            base_url=self.base_url,
+            ring_client=mock_ring,
+        )
+
+        notifier.send_escalation(
+            routine=self.sample_routine,
+            local_date="2026-10-12",
+            fired_at="2026-10-12T14:35:00Z",
+        )
+
+        # Photo failed, so sendMessage was called as fallback
+        self.assertEqual(len(self.server.sent_photos), 0)
+        self.assertEqual(len(self.server.sent_messages), 1)
+        msg = self.server.sent_messages[0]
+        self.assertIn("THRESHOLD ESCALATION", msg.get("text", ""))
+        self.assertIn("Morning Door", msg.get("text", ""))
+
+    def test_send_escalation_falls_back_to_text_when_send_photo_fails(self):
+        """When sendPhoto endpoint fails with HTTP 500, falls back gracefully to sendMessage."""
+        mock_ring = MockRingSnapshotClient(snapshot_data=b"test_image")
+        self.server.fail_send_photo_with_500 = True
+
+        notifier = TelegramNotifier(
+            bot_token="tok_photo_fail",
+            chat_id="5551234",
+            base_url=self.base_url,
+            ring_client=mock_ring,
+        )
+
+        notifier.send_escalation(
+            routine=self.sample_routine,
+            local_date="2026-10-12",
+            fired_at="2026-10-12T14:35:00Z",
+        )
+
+        # sendPhoto was attempted and failed, sendMessage delivered the alert
+        self.assertEqual(len(self.server.sent_messages), 1)
+        self.assertIn("THRESHOLD ESCALATION", self.server.sent_messages[0].get("text", ""))
+
+    def test_token_redacted_in_multipart_failure(self):
+        """Telegram bot token is never exposed in multipart error messages."""
+        secret_token = "SECRET_TELEGRAM_TOKEN_999"
+        self.server.fail_send_photo_with_500 = True
+
+        notifier = TelegramNotifier(
+            bot_token=secret_token,
+            chat_id="5551234",
+            base_url=self.base_url,
+        )
+
+        with self.assertRaises(RuntimeError) as ctx:
+            notifier.send_photo(photo_bytes=b"raw_bytes", caption="Test")
+
+        err_str = str(ctx.exception)
+        self.assertNotIn(secret_token, err_str)
+        self.assertIn("[REDACTED]", err_str)
+
+    def test_console_notifier_displays_snapshot_device(self):
+        """ConsoleNotifier displays snapshot camera ID when present on routine."""
+        from io import StringIO
+        import sys
+
+        routine = Routine(
+            property_id="prop_1",
+            name="Porch Routine",
+            device_id="sensor_1",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone="America/Chicago",
+            days=["mon"],
+            snapshot_device_id="cam_porch_view",
+        )
+        routine.routine_id = "rt_porch"
+
+        console = ConsoleNotifier()
+        captured = StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = captured
+            console.send_escalation(routine, local_date="2026-10-12", fired_at="2026-10-12T14:35:00Z")
+        finally:
+            sys.stdout = old_stdout
+
+        out = captured.getvalue()
+        self.assertIn("Snapshot Camera: cam_porch_view", out)
+
+
+class MockRingSnapshotClient:
+    """Mock RingClient providing configurable get_snapshot responses."""
+
+    def __init__(self, snapshot_data: Optional[bytes] = None, raise_error: Optional[Exception] = None):
+        self.snapshot_data = snapshot_data or b"\xFF\xD8\xFF\xFE_MOCK_JPEG_PAYLOAD_"
+        self.raise_error = raise_error
+        self.requested_devices: List[str] = []
+        self.requested_timestamps: List[int] = []
+
+    def get_snapshot(self, device_id: str, timestamp_ms: int) -> bytes:
+        self.requested_devices.append(device_id)
+        self.requested_timestamps.append(timestamp_ms)
+        if self.raise_error:
+            raise self.raise_error
+        return self.snapshot_data
 
 
 if __name__ == "__main__":

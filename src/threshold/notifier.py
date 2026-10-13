@@ -12,9 +12,10 @@ import json
 import logging
 import re
 import sqlite3
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import urllib.error
 import urllib.request
+import uuid
 
 from src.threshold.models import Routine
 from src.threshold.store import (
@@ -163,6 +164,9 @@ class RecordingNotifier(Notifier):
 class ConsoleNotifier(Notifier):
     """Console / stdout notifier for CLI operations and demonstrations."""
 
+    def __init__(self, ring_client: Optional[Any] = None):
+        self.ring_client = ring_client
+
     def send_escalation(
         self,
         routine: Routine,
@@ -173,12 +177,17 @@ class ConsoleNotifier(Notifier):
         expected_by = format_expected_by(routine)
         health_state = format_health_state(routine, device_health)
         last_act = format_last_activity(routine, device_health)
+        cam_info = ""
+        snap_id = getattr(routine, "snapshot_device_id", None)
+        if snap_id:
+            cam_info = f"\nSnapshot Camera: {snap_id}"
         print(
             f"[ESCALATION]\n"
             f"Routine: {routine.name} ({routine.routine_id})\n"
             f"Expected by: {expected_by}\n"
             f"Device State: {health_state}\n"
-            f"Last Activity: {last_act}\n"
+            f"Last Activity: {last_act}"
+            f"{cam_info}\n"
             f"Fired at: {fired_at} (Date: {local_date})\n"
             f"Note: This is an automated text message notification, not a phone call."
         )
@@ -193,21 +202,74 @@ class ConsoleNotifier(Notifier):
         expected_by = format_expected_by(routine)
         health_state = format_health_state(routine, device_health)
         last_act = format_last_activity(routine, device_health)
+        cam_info = ""
+        snap_id = getattr(routine, "snapshot_device_id", None)
+        if snap_id:
+            cam_info = f"\nSnapshot Camera: {snap_id}"
         print(
             f"[REMINDER: Escalation Unacknowledged]\n"
             f"Routine: {routine.name} ({routine.routine_id})\n"
             f"Expected by: {expected_by}\n"
             f"Device State: {health_state}\n"
-            f"Last Activity: {last_act}\n"
+            f"Last Activity: {last_act}"
+            f"{cam_info}\n"
             f"Originally fired at: {fired_at} (Date: {local_date})\n"
             f"Note: This is an automated text message notification, not a phone call."
         )
 
 
+def encode_multipart_form_data(
+    fields: Dict[str, str],
+    files: Dict[str, Tuple[str, bytes, str]],
+    boundary: Optional[str] = None,
+) -> Tuple[bytes, str]:
+    """
+    Encode form fields and binary file uploads into standard multipart/form-data.
+    Zero external dependencies (pure Python standard library).
+
+    fields: dict of {field_name: string_value}
+    files: dict of {field_name: (filename, binary_bytes, mime_type)}
+
+    Returns:
+        (body_bytes, content_type_header)
+    """
+    if not boundary:
+        boundary = f"----ThresholdBoundary{uuid.uuid4().hex}"
+
+    body_parts: List[bytes] = []
+
+    # Encode regular string form fields
+    for name, value in fields.items():
+        part = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+            f"{value}\r\n"
+        ).encode("utf-8")
+        body_parts.append(part)
+
+    # Encode binary file parts
+    for name, (filename, data, mime_type) in files.items():
+        header = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+            f"Content-Type: {mime_type}\r\n\r\n"
+        ).encode("utf-8")
+        body_parts.append(header)
+        body_parts.append(data)
+        body_parts.append(b"\r\n")
+
+    # Final closing boundary
+    body_parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+
+    content_type_header = f"multipart/form-data; boundary={boundary}"
+    return b"".join(body_parts), content_type_header
+
+
 class TelegramNotifier(Notifier):
     """
     Production Telegram Bot Notifier.
-    Delivers messages via sendMessage with inline keyboard ['False alarm', 'Got it'].
+    Delivers messages via sendMessage or sendPhoto with inline keyboard ['False alarm', 'Got it'].
+    Supports snapshot enrichment from RingClient when cameras are configured.
     Maintains getUpdates offset tracking and processes caretaker callback queries.
     Enforces chat isolation: ignores callback queries from foreign chat IDs.
     Redacts bot tokens from all network calls, logged messages, and error exceptions.
@@ -219,12 +281,14 @@ class TelegramNotifier(Notifier):
         chat_id: Union[str, int],
         base_url: str = "https://api.telegram.org",
         timeout: float = 10.0,
+        ring_client: Optional[Any] = None,
     ):
         self.bot_token = bot_token
         self.chat_id = str(chat_id)
         self.base_url = base_url.rstrip("/")
         self.timeout = float(timeout)
         self.last_offset: int = 0
+        self.ring_client = ring_client
 
     def _redact(self, text: str) -> str:
         """Helper to redact the instance's bot token."""
@@ -258,6 +322,64 @@ class TelegramNotifier(Notifier):
             logger.error("Telegram API call to %s failed: %s", endpoint, redacted_msg)
             raise RuntimeError(f"Telegram API request to {endpoint} failed: {redacted_msg}") from None
 
+    def _make_multipart_request(
+        self,
+        endpoint: str,
+        fields: Dict[str, str],
+        files: Dict[str, Tuple[str, bytes, str]],
+    ) -> dict:
+        """
+        Execute an HTTP POST with multipart/form-data to Telegram Bot API with token redaction.
+        """
+        url = f"{self.base_url}/bot{self.bot_token}/{endpoint}"
+        body_bytes, content_type = encode_multipart_form_data(fields, files)
+
+        req = urllib.request.Request(
+            url,
+            data=body_bytes,
+            headers={
+                "Content-Type": content_type,
+                "Content-Length": str(len(body_bytes)),
+                "User-Agent": "Threshold/1.0",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                resp_bytes = resp.read()
+                return json.loads(resp_bytes.decode("utf-8"))
+        except (urllib.error.HTTPError, urllib.error.URLError, Exception) as exc:
+            detail = str(exc)
+            if hasattr(exc, "url") and exc.url:
+                detail = f"{detail} ({exc.url})"
+            redacted_msg = self._redact(detail)
+            logger.error("Telegram API multipart call to %s failed: %s", endpoint, redacted_msg)
+            raise RuntimeError(f"Telegram API request to {endpoint} failed: {redacted_msg}") from None
+
+    def send_photo(
+        self,
+        photo_bytes: bytes,
+        caption: str,
+        reply_markup: Optional[Dict[str, Any]] = None,
+        filename: str = "snapshot.jpg",
+    ) -> dict:
+        """
+        Send photo with caption and inline keyboard to Telegram using multipart/form-data.
+        """
+        fields: Dict[str, str] = {
+            "chat_id": self.chat_id,
+            "caption": caption,
+            "parse_mode": "HTML",
+        }
+        if reply_markup is not None:
+            fields["reply_markup"] = json.dumps(reply_markup)
+
+        files = {
+            "photo": (filename, photo_bytes, "image/jpeg"),
+        }
+        return self._make_multipart_request("sendPhoto", fields, files)
+
     def send_escalation(
         self,
         routine: Routine,
@@ -267,7 +389,10 @@ class TelegramNotifier(Notifier):
     ) -> None:
         """
         Send initial escalation notification with inline keyboard:
-        ['False alarm', 'Got it']
+        ['False alarm', 'Got it'].
+        If snapshot_device_id (or device_id) and ring_client are available,
+        fetches snapshot and sends via sendPhoto.
+        If snapshot fails or client is unavailable, falls back gracefully to sendMessage.
         """
         expected_by = format_expected_by(routine)
         health_state = format_health_state(routine, device_health)
@@ -301,14 +426,38 @@ class TelegramNotifier(Notifier):
             ]
         }
 
-        payload = {
-            "chat_id": self.chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "reply_markup": keyboard,
-        }
+        # Attempt snapshot capture if ring_client is available
+        target_cam_id = getattr(routine, "snapshot_device_id", None) or getattr(routine, "device_id", None)
+        photo_sent = False
 
-        self._make_request("sendMessage", payload)
+        if self.ring_client and target_cam_id:
+            try:
+                now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                photo_bytes = self.ring_client.get_snapshot(target_cam_id, timestamp_ms=now_ms)
+                if photo_bytes:
+                    self.send_photo(
+                        photo_bytes=photo_bytes,
+                        caption=text,
+                        reply_markup=keyboard,
+                    )
+                    photo_sent = True
+                    logger.info("Delivered snapshot-enriched escalation photo for routine '%s'", routine.routine_id)
+            except Exception as exc:
+                logger.warning(
+                    "Snapshot capture/delivery failed for routine '%s' (%s): %s. Falling back to text-only alert.",
+                    routine.routine_id,
+                    target_cam_id,
+                    self._redact(str(exc)),
+                )
+
+        if not photo_sent:
+            payload = {
+                "chat_id": self.chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "reply_markup": keyboard,
+            }
+            self._make_request("sendMessage", payload)
 
     def send_reminder(
         self,
@@ -319,6 +468,8 @@ class TelegramNotifier(Notifier):
     ) -> None:
         """
         Send reminder notification for unacknowledged escalation with inline keyboard.
+        If ring_client and camera are available, also attempts snapshot photo.
+        Falls back gracefully to sendMessage.
         """
         expected_by = format_expected_by(routine)
         health_state = format_health_state(routine, device_health)
@@ -352,14 +503,38 @@ class TelegramNotifier(Notifier):
             ]
         }
 
-        payload = {
-            "chat_id": self.chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "reply_markup": keyboard,
-        }
+        # Attempt snapshot capture for reminder as well
+        target_cam_id = getattr(routine, "snapshot_device_id", None) or getattr(routine, "device_id", None)
+        photo_sent = False
 
-        self._make_request("sendMessage", payload)
+        if self.ring_client and target_cam_id:
+            try:
+                now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                photo_bytes = self.ring_client.get_snapshot(target_cam_id, timestamp_ms=now_ms)
+                if photo_bytes:
+                    self.send_photo(
+                        photo_bytes=photo_bytes,
+                        caption=text,
+                        reply_markup=keyboard,
+                    )
+                    photo_sent = True
+                    logger.info("Delivered snapshot-enriched reminder photo for routine '%s'", routine.routine_id)
+            except Exception as exc:
+                logger.warning(
+                    "Snapshot capture/delivery failed for reminder on routine '%s' (%s): %s. Falling back to text-only alert.",
+                    routine.routine_id,
+                    target_cam_id,
+                    self._redact(str(exc)),
+                )
+
+        if not photo_sent:
+            payload = {
+                "chat_id": self.chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "reply_markup": keyboard,
+            }
+            self._make_request("sendMessage", payload)
 
     def get_updates(self, offset: Optional[int] = None, timeout: int = 0) -> List[Dict[str, Any]]:
         """

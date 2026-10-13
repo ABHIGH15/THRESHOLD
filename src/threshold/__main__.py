@@ -221,9 +221,13 @@ def run_daemon_command(args: argparse.Namespace) -> int:
     tg_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     tg_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if tg_token and tg_chat_id and tg_token.strip() and tg_chat_id.strip():
-        notifier = TelegramNotifier(bot_token=tg_token.strip(), chat_id=tg_chat_id.strip())
+        notifier = TelegramNotifier(
+            bot_token=tg_token.strip(),
+            chat_id=tg_chat_id.strip(),
+            ring_client=ring_client,
+        )
     else:
-        notifier = ConsoleNotifier()
+        notifier = ConsoleNotifier(ring_client=ring_client)
 
     config = DaemonConfig(
         db_path=args.db,

@@ -145,9 +145,9 @@ def row_to_routine(row: Dict[str, Any]) -> Routine:
         escalation_delay_minutes=row.get("escalation_delay_minutes", 30),
         last_satisfied_at=sat_dt,
         snoozed_until=snooze_dt,
+        snapshot_device_id=row.get("snapshot_device_id"),
     )
     routine.routine_id = row["routine_id"]  # Attach routine_id for convenience
-    routine.snapshot_device_id = row.get("snapshot_device_id")
     return routine
 
 
