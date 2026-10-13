@@ -27,8 +27,10 @@ from src.threshold.notifier import (
     Notifier,
     RecordingNotifier,
     TelegramNotifier,
+    detect_image_mime,
     encode_multipart_form_data,
     redact_telegram_token,
+    truncate_caption,
 )
 from src.threshold.ring_client import MediaUnavailable
 from src.threshold.scheduler import FakeClock, Scheduler, run_scheduler_tick
@@ -186,6 +188,8 @@ class TestNotifierSystem(unittest.TestCase):
         self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.server_thread.start()
 
+        self.temp_snap_dir = tempfile.TemporaryDirectory()
+
         self.sample_routine = Routine(
             property_id="prop_1",
             name="Morning Door",
@@ -203,6 +207,7 @@ class TestNotifierSystem(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.server_thread.join(timeout=2)
+        self.temp_snap_dir.cleanup()
 
         for suffix in ("", "-wal", "-shm"):
             p = f"{self.db_path}{suffix}"
@@ -857,7 +862,7 @@ class TestNotifierSystem(unittest.TestCase):
         keyboard = {
             "inline_keyboard": [[{"text": "False alarm", "callback_data": "fa:1"}, {"text": "Got it", "callback_data": "ak:1"}]]
         }
-        test_jpeg = b"\xFF\xD8\xFF\xFE_MOCK_IMAGE_BYTES_"
+        test_jpeg = b"\xFF\xD8\xFF\xE0" + b"_MOCK_IMAGE_BYTES_LONG_ENOUGH_FOR_VALIDATION_12345_"
 
         res = notifier.send_photo(
             photo_bytes=test_jpeg,
@@ -876,12 +881,13 @@ class TestNotifierSystem(unittest.TestCase):
 
     def test_send_escalation_with_snapshot_enrichment(self):
         """Escalation with configured camera fetches Ring snapshot and delivers sendPhoto with inline buttons."""
-        mock_ring = MockRingSnapshotClient(snapshot_data=b"\xFF\xD8\xFF\xFE_LIVE_RING_SNAPSHOT_JPEG_")
+        mock_ring = MockRingSnapshotClient(snapshot_data=b"\xFF\xD8\xFF\xE0" + b"_LIVE_RING_SNAPSHOT_JPEG_LONG_PAYLOAD_")
         notifier = TelegramNotifier(
             bot_token="tok_live_esc",
             chat_id="5551234",
             base_url=self.base_url,
             ring_client=mock_ring,
+            snapshot_dir=self.temp_snap_dir.name,
         )
 
         routine_with_cam = Routine(
@@ -898,7 +904,7 @@ class TestNotifierSystem(unittest.TestCase):
         )
         routine_with_cam.routine_id = "rt_medicine"
 
-        notifier.send_escalation(
+        res = notifier.send_escalation(
             routine=routine_with_cam,
             local_date="2026-10-12",
             fired_at="2026-10-12T14:35:00Z",
@@ -918,6 +924,12 @@ class TestNotifierSystem(unittest.TestCase):
         self.assertIn(b"False alarm", photo_body)
         self.assertIn(b"Got it", photo_body)
 
+        # Check metadata dict
+        self.assertIsInstance(res, dict)
+        self.assertEqual(res["type"], "photo")
+        self.assertTrue(res["has_photo"])
+        self.assertEqual(res["channel"], "telegram")
+
     def test_send_escalation_falls_back_to_text_when_snapshot_unavailable(self):
         """When RingClient.get_snapshot raises MediaUnavailable, falls back cleanly to sendMessage."""
         mock_ring = MockRingSnapshotClient(raise_error=MediaUnavailable("Camera offline / recording not ready"))
@@ -928,7 +940,7 @@ class TestNotifierSystem(unittest.TestCase):
             ring_client=mock_ring,
         )
 
-        notifier.send_escalation(
+        res = notifier.send_escalation(
             routine=self.sample_routine,
             local_date="2026-10-12",
             fired_at="2026-10-12T14:35:00Z",
@@ -941,9 +953,13 @@ class TestNotifierSystem(unittest.TestCase):
         self.assertIn("THRESHOLD ESCALATION", msg.get("text", ""))
         self.assertIn("Morning Door", msg.get("text", ""))
 
+        self.assertIsInstance(res, dict)
+        self.assertEqual(res["type"], "text")
+        self.assertFalse(res["has_photo"])
+
     def test_send_escalation_falls_back_to_text_when_send_photo_fails(self):
         """When sendPhoto endpoint fails with HTTP 500, falls back gracefully to sendMessage."""
-        mock_ring = MockRingSnapshotClient(snapshot_data=b"test_image")
+        mock_ring = MockRingSnapshotClient(snapshot_data=b"\xFF\xD8\xFF\xE0" + b"\x00" * 40)
         self.server.fail_send_photo_with_500 = True
 
         notifier = TelegramNotifier(
@@ -953,7 +969,7 @@ class TestNotifierSystem(unittest.TestCase):
             ring_client=mock_ring,
         )
 
-        notifier.send_escalation(
+        res = notifier.send_escalation(
             routine=self.sample_routine,
             local_date="2026-10-12",
             fired_at="2026-10-12T14:35:00Z",
@@ -962,6 +978,7 @@ class TestNotifierSystem(unittest.TestCase):
         # sendPhoto was attempted and failed, sendMessage delivered the alert
         self.assertEqual(len(self.server.sent_messages), 1)
         self.assertIn("THRESHOLD ESCALATION", self.server.sent_messages[0].get("text", ""))
+        self.assertEqual(res["type"], "text")
 
     def test_token_redacted_in_multipart_failure(self):
         """Telegram bot token is never exposed in multipart error messages."""
@@ -974,8 +991,9 @@ class TestNotifierSystem(unittest.TestCase):
             base_url=self.base_url,
         )
 
+        valid_jpeg = b"\xFF\xD8\xFF\xE0" + b"\x00" * 40
         with self.assertRaises(RuntimeError) as ctx:
-            notifier.send_photo(photo_bytes=b"raw_bytes", caption="Test")
+            notifier.send_photo(photo_bytes=valid_jpeg, caption="Test")
 
         err_str = str(ctx.exception)
         self.assertNotIn(secret_token, err_str)
@@ -1004,26 +1022,151 @@ class TestNotifierSystem(unittest.TestCase):
         old_stdout = sys.stdout
         try:
             sys.stdout = captured
-            console.send_escalation(routine, local_date="2026-10-12", fired_at="2026-10-12T14:35:00Z")
+            res = console.send_escalation(routine, local_date="2026-10-12", fired_at="2026-10-12T14:35:00Z")
         finally:
             sys.stdout = old_stdout
 
         out = captured.getvalue()
         self.assertIn("Snapshot Camera: cam_porch_view", out)
+        self.assertEqual(res["channel"], "console")
+        self.assertEqual(res["type"], "text")
+
+    def test_detect_image_mime(self):
+        """detect_image_mime detects JPEG, PNG, WebP, and application/octet-stream."""
+        jpeg_magic = b"\xFF\xD8\xFF\xE0_test"
+        png_magic = b"\x89PNG\r\n\x1a\n_test"
+        webp_magic = b"RIFF\x00\x00\x00\x00WEBPVP8 "
+        other = b"PLAIN_TEXT_NOT_AN_IMAGE"
+
+        self.assertEqual(detect_image_mime(jpeg_magic), "image/jpeg")
+        self.assertEqual(detect_image_mime(png_magic), "image/png")
+        self.assertEqual(detect_image_mime(webp_magic), "image/webp")
+        self.assertEqual(detect_image_mime(other), "application/octet-stream")
+        self.assertEqual(detect_image_mime(b""), "application/octet-stream")
+
+    def test_truncate_caption(self):
+        """truncate_caption respects 1024-char limit and appends ellipsis when exceeded."""
+        short_caption = "<b>Alert</b>: Routine missed."
+        self.assertEqual(truncate_caption(short_caption, max_chars=1024), short_caption)
+
+        long_caption = "A" * 1200
+        truncated = truncate_caption(long_caption, max_chars=1024)
+        self.assertLessEqual(len(truncated), 1024)
+        self.assertTrue(truncated.endswith("..."))
+
+        long_with_tag = "<i>" + "B" * 1200
+        truncated_tag = truncate_caption(long_with_tag, max_chars=1024)
+        self.assertLessEqual(len(truncated_tag), 1024)
+        self.assertTrue(truncated_tag.endswith("...</i>"))
+
+    def test_send_photo_rejects_corrupt_or_empty_bytes(self):
+        """send_photo raises ValueError for empty, tiny (<32 bytes), or non-image payloads."""
+        notifier = TelegramNotifier(bot_token="tok_val", chat_id="5551234", base_url=self.base_url)
+
+        with self.assertRaises(ValueError):
+            notifier.send_photo(photo_bytes=b"", caption="Empty")
+
+        with self.assertRaises(ValueError):
+            notifier.send_photo(photo_bytes=b"too_short", caption="Short")
+
+        with self.assertRaises(ValueError):
+            notifier.send_photo(photo_bytes=b"A" * 40, caption="Not image")
+
+    def test_send_escalation_honors_snapshot_timeout(self):
+        """send_escalation passes snapshot_timeout to RingClient.get_snapshot."""
+        mock_ring = MockRingSnapshotClient()
+        notifier = TelegramNotifier(
+            bot_token="tok_time",
+            chat_id="5551234",
+            base_url=self.base_url,
+            ring_client=mock_ring,
+            snapshot_timeout=3.5,
+            snapshot_dir=self.temp_snap_dir.name,
+        )
+
+        notifier.send_escalation(
+            routine=self.sample_routine,
+            local_date="2026-10-12",
+            fired_at="2026-10-12T14:35:00Z",
+        )
+
+        self.assertEqual(mock_ring.requested_timeouts, [3.5])
+
+    def test_send_escalation_archives_snapshot_to_disk(self):
+        """send_escalation saves snapshot image to configured snapshot_dir."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sample_bytes = b"\xFF\xD8\xFF\xE0_ARCHIVE_TEST_BYTES_FOR_SNAPSHOT_"
+            mock_ring = MockRingSnapshotClient(snapshot_data=sample_bytes)
+            notifier = TelegramNotifier(
+                bot_token="tok_arch",
+                chat_id="5551234",
+                base_url=self.base_url,
+                ring_client=mock_ring,
+                snapshot_dir=tmp_dir,
+            )
+
+            res = notifier.send_escalation(
+                routine=self.sample_routine,
+                local_date="2026-10-12",
+                fired_at="2026-10-12T14:35:00Z",
+            )
+
+            expected_file = os.path.join(tmp_dir, f"{self.sample_routine.routine_id}_2026-10-12.jpg")
+            latest_file = os.path.join(tmp_dir, f"{self.sample_routine.routine_id}_latest.jpg")
+
+            self.assertTrue(os.path.exists(expected_file))
+            self.assertTrue(os.path.exists(latest_file))
+            with open(expected_file, "rb") as f:
+                self.assertEqual(f.read(), sample_bytes)
+            self.assertEqual(res["snapshot_path"], expected_file)
+
+    def test_cli_test_alert_command(self):
+        """CLI test-alert command dispatches an alert without crashing."""
+        import argparse
+        from io import StringIO
+        import sys
+        from src.threshold.__main__ import run_test_alert_command
+
+        test_args = argparse.Namespace(
+            config="threshold.example.json",
+            routine=None,
+            camera=None,
+            no_photo=True,
+        )
+
+        captured = StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = captured
+            exit_code = run_test_alert_command(test_args)
+        finally:
+            sys.stdout = old_stdout
+
+        self.assertEqual(exit_code, 0)
+        output = captured.getvalue()
+        self.assertIn("THRESHOLD TEST ALERT DISPATCH", output)
+        self.assertIn("Test alert successfully dispatched!", output)
 
 
 class MockRingSnapshotClient:
     """Mock RingClient providing configurable get_snapshot responses."""
 
     def __init__(self, snapshot_data: Optional[bytes] = None, raise_error: Optional[Exception] = None):
-        self.snapshot_data = snapshot_data or b"\xFF\xD8\xFF\xFE_MOCK_JPEG_PAYLOAD_"
+        self.snapshot_data = snapshot_data or (b"\xFF\xD8\xFF\xE0" + b"\x00" * 40)
         self.raise_error = raise_error
         self.requested_devices: List[str] = []
         self.requested_timestamps: List[int] = []
+        self.requested_timeouts: List[Optional[float]] = []
 
-    def get_snapshot(self, device_id: str, timestamp_ms: int) -> bytes:
+    def get_snapshot(
+        self,
+        device_id: str,
+        timestamp_ms: int,
+        timeout: Optional[float] = None,
+    ) -> bytes:
         self.requested_devices.append(device_id)
         self.requested_timestamps.append(timestamp_ms)
+        self.requested_timeouts.append(timeout)
         if self.raise_error:
             raise self.raise_error
         return self.snapshot_data

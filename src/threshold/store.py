@@ -111,6 +111,8 @@ CREATE TABLE IF NOT EXISTS escalations (
     acked_at TEXT,
     notified_at TEXT,
     reminded_at TEXT,
+    snapshot_status TEXT,
+    snapshot_path TEXT,
     UNIQUE(routine_id, local_date),
     FOREIGN KEY(routine_id) REFERENCES routines(routine_id)
 );
@@ -149,6 +151,14 @@ def init_db(conn_or_path: Optional[Union[sqlite3.Connection, str]] = None) -> sq
         pass
     try:
         conn.execute("ALTER TABLE escalations ADD COLUMN reminded_at TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE escalations ADD COLUMN snapshot_status TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE escalations ADD COLUMN snapshot_path TEXT;")
     except sqlite3.OperationalError:
         pass
     try:
@@ -423,6 +433,21 @@ def ack_escalation(
     conn.execute(
         "UPDATE escalations SET acked_at = ? WHERE routine_id = ? AND local_date = ?",
         (iso, routine_id, local_date),
+    )
+    conn.commit()
+
+
+def update_escalation_snapshot(
+    conn: sqlite3.Connection,
+    routine_id: str,
+    local_date: str,
+    status: str,
+    path: Optional[str] = None,
+) -> None:
+    """Record snapshot delivery status and saved file path for an escalation."""
+    conn.execute(
+        "UPDATE escalations SET snapshot_status = ?, snapshot_path = ? WHERE routine_id = ? AND local_date = ?",
+        (status, path, routine_id, local_date),
     )
     conn.commit()
 

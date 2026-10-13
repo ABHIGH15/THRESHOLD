@@ -22,3 +22,6 @@ evidence/
 
 # Python virtual environment
 .venv/
+
+# Local snapshots
+snapshots/

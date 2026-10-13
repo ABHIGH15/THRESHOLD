@@ -43,6 +43,7 @@ from src.threshold.store import (
     mark_escalation_notified,
     mark_escalation_reminded,
     record_escalation,
+    update_escalation_snapshot,
 )
 
 logger = logging.getLogger("threshold.scheduler")
@@ -273,9 +274,13 @@ def run_scheduler_tick(
         )
 
         try:
-            notifier.send_escalation(routine_obj, local_date, fired_at, device_health=health)
+            deliv_res = notifier.send_escalation(routine_obj, local_date, fired_at, device_health=health)
             mark_escalation_notified(conn, esc_routine_id, local_date, now)
             delivered_count += 1
+            if isinstance(deliv_res, dict):
+                st = deliv_res.get("type", "notified")
+                p = deliv_res.get("snapshot_path")
+                update_escalation_snapshot(conn, esc_routine_id, local_date, status=st, path=p)
         except Exception as e:
             logger.warning(
                 "Escalation notification failed for routine %s (%s): %s",
@@ -310,9 +315,13 @@ def run_scheduler_tick(
         )
 
         try:
-            notifier.send_reminder(routine_obj, local_date, fired_at, device_health=health)
+            rem_res = notifier.send_reminder(routine_obj, local_date, fired_at, device_health=health)
             mark_escalation_reminded(conn, esc_routine_id, local_date, now)
             reminded_count += 1
+            if isinstance(rem_res, dict):
+                st = rem_res.get("type", "reminded")
+                p = rem_res.get("snapshot_path")
+                update_escalation_snapshot(conn, esc_routine_id, local_date, status=st, path=p)
         except Exception as e:
             logger.warning(
                 "Reminder notification failed for routine %s (%s): %s",

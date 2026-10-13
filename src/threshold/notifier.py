@@ -10,8 +10,10 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
+import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 import urllib.error
 import urllib.request
@@ -173,7 +175,7 @@ class ConsoleNotifier(Notifier):
         local_date: str,
         fired_at: str,
         device_health: Optional[Any] = None,
-    ) -> None:
+    ) -> Dict[str, Any]:
         expected_by = format_expected_by(routine)
         health_state = format_health_state(routine, device_health)
         last_act = format_last_activity(routine, device_health)
@@ -191,6 +193,13 @@ class ConsoleNotifier(Notifier):
             f"Fired at: {fired_at} (Date: {local_date})\n"
             f"Note: This is an automated text message notification, not a phone call."
         )
+        return {
+            "channel": "console",
+            "delivered": True,
+            "type": "text",
+            "has_photo": False,
+            "snapshot_path": None,
+        }
 
     def send_reminder(
         self,
@@ -198,7 +207,7 @@ class ConsoleNotifier(Notifier):
         local_date: str,
         fired_at: str,
         device_health: Optional[Any] = None,
-    ) -> None:
+    ) -> Dict[str, Any]:
         expected_by = format_expected_by(routine)
         health_state = format_health_state(routine, device_health)
         last_act = format_last_activity(routine, device_health)
@@ -216,10 +225,48 @@ class ConsoleNotifier(Notifier):
             f"Originally fired at: {fired_at} (Date: {local_date})\n"
             f"Note: This is an automated text message notification, not a phone call."
         )
+        return {
+            "channel": "console",
+            "delivered": True,
+            "type": "text",
+            "has_photo": False,
+            "snapshot_path": None,
+        }
+
+
+def detect_image_mime(data: bytes) -> str:
+    """
+    Detect image MIME type from binary magic bytes (pure Python standard library).
+    Returns 'image/jpeg', 'image/png', 'image/webp', or 'application/octet-stream'.
+    """
+    if not data or len(data) < 4:
+        return "application/octet-stream"
+    if data.startswith(b"\xff\xd8"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def truncate_caption(caption: str, max_chars: int = 1024) -> str:
+    """
+    Ensure Telegram photo caption strictly stays within Telegram's 1024-character limit.
+    Appends ellipsis while maintaining HTML tag closure if truncation is necessary.
+    """
+    if len(caption) <= max_chars:
+        return caption
+    cut_point = max_chars - 3
+    prefix = caption[:cut_point]
+    if prefix.count("<i>") > prefix.count("</i>"):
+        cut_point = max(0, max_chars - 7)
+        return caption[:cut_point] + "...</i>"
+    return prefix + "..."
 
 
 def encode_multipart_form_data(
-    fields: Dict[str, str],
+    fields: Dict[str, Any],
     files: Dict[str, Tuple[str, bytes, str]],
     boundary: Optional[str] = None,
 ) -> Tuple[bytes, str]:
@@ -227,7 +274,7 @@ def encode_multipart_form_data(
     Encode form fields and binary file uploads into standard multipart/form-data.
     Zero external dependencies (pure Python standard library).
 
-    fields: dict of {field_name: string_value}
+    fields: dict of {field_name: value}
     files: dict of {field_name: (filename, binary_bytes, mime_type)}
 
     Returns:
@@ -240,18 +287,23 @@ def encode_multipart_form_data(
 
     # Encode regular string form fields
     for name, value in fields.items():
+        if value is None:
+            continue
+        clean_name = re.sub(r'["\r\n]', '', str(name))
         part = (
             f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+            f'Content-Disposition: form-data; name="{clean_name}"\r\n\r\n'
             f"{value}\r\n"
         ).encode("utf-8")
         body_parts.append(part)
 
     # Encode binary file parts
     for name, (filename, data, mime_type) in files.items():
+        clean_name = re.sub(r'["\r\n]', '', str(name))
+        clean_fn = re.sub(r'["\r\n]', '', str(filename))
         header = (
             f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+            f'Content-Disposition: form-data; name="{clean_name}"; filename="{clean_fn}"\r\n'
             f"Content-Type: {mime_type}\r\n\r\n"
         ).encode("utf-8")
         body_parts.append(header)
@@ -282,6 +334,8 @@ class TelegramNotifier(Notifier):
         base_url: str = "https://api.telegram.org",
         timeout: float = 10.0,
         ring_client: Optional[Any] = None,
+        snapshot_timeout: float = 4.0,
+        snapshot_dir: Optional[str] = "snapshots",
     ):
         self.bot_token = bot_token
         self.chat_id = str(chat_id)
@@ -289,10 +343,32 @@ class TelegramNotifier(Notifier):
         self.timeout = float(timeout)
         self.last_offset: int = 0
         self.ring_client = ring_client
+        self.snapshot_timeout = float(snapshot_timeout)
+        self.snapshot_dir = snapshot_dir
 
     def _redact(self, text: str) -> str:
         """Helper to redact the instance's bot token."""
         return redact_telegram_token(text, self.bot_token)
+
+    def _archive_snapshot(self, routine_id: str, local_date: str, photo_bytes: bytes) -> Optional[str]:
+        """Save a copy of snapshot image to local disk for dashboard and audit review."""
+        if not self.snapshot_dir:
+            return None
+        try:
+            os.makedirs(self.snapshot_dir, exist_ok=True)
+            safe_rt = re.sub(r"[^a-zA-Z0-9_-]", "_", routine_id)
+            safe_dt = re.sub(r"[^a-zA-Z0-9_-]", "_", local_date)
+            ext = "jpg" if photo_bytes.startswith(b"\xff\xd8") else "png"
+            target_path = os.path.join(self.snapshot_dir, f"{safe_rt}_{safe_dt}.{ext}")
+            with open(target_path, "wb") as f:
+                f.write(photo_bytes)
+            latest_path = os.path.join(self.snapshot_dir, f"{safe_rt}_latest.{ext}")
+            with open(latest_path, "wb") as f:
+                f.write(photo_bytes)
+            return target_path
+        except Exception as e:
+            logger.debug("Failed to archive snapshot locally to %s: %s", self.snapshot_dir, e)
+            return None
 
     def _make_request(self, endpoint: str, payload: dict) -> dict:
         """
@@ -325,7 +401,7 @@ class TelegramNotifier(Notifier):
     def _make_multipart_request(
         self,
         endpoint: str,
-        fields: Dict[str, str],
+        fields: Dict[str, Any],
         files: Dict[str, Tuple[str, bytes, str]],
     ) -> dict:
         """
@@ -362,21 +438,39 @@ class TelegramNotifier(Notifier):
         photo_bytes: bytes,
         caption: str,
         reply_markup: Optional[Dict[str, Any]] = None,
-        filename: str = "snapshot.jpg",
+        filename: Optional[str] = None,
     ) -> dict:
         """
         Send photo with caption and inline keyboard to Telegram using multipart/form-data.
+        Validates image binary format and enforces 1024-character caption limit.
         """
-        fields: Dict[str, str] = {
+        if not photo_bytes or len(photo_bytes) < 32:
+            raise ValueError(
+                f"Invalid image binary payload: length is too small ({len(photo_bytes) if photo_bytes else 0} bytes)"
+            )
+
+        detected_mime = detect_image_mime(photo_bytes)
+        if detected_mime not in ("image/jpeg", "image/png", "image/webp"):
+            raise ValueError(
+                "Unrecognized image binary format: magic bytes do not match JPEG, PNG, or WebP"
+            )
+
+        if not filename:
+            ext = "jpg" if detected_mime == "image/jpeg" else ("png" if detected_mime == "image/png" else "webp")
+            filename = f"snapshot.{ext}"
+
+        safe_caption = truncate_caption(caption, max_chars=1024)
+
+        fields: Dict[str, Any] = {
             "chat_id": self.chat_id,
-            "caption": caption,
+            "caption": safe_caption,
             "parse_mode": "HTML",
         }
         if reply_markup is not None:
             fields["reply_markup"] = json.dumps(reply_markup)
 
         files = {
-            "photo": (filename, photo_bytes, "image/jpeg"),
+            "photo": (filename, photo_bytes, detected_mime),
         }
         return self._make_multipart_request("sendPhoto", fields, files)
 
@@ -386,13 +480,17 @@ class TelegramNotifier(Notifier):
         local_date: str,
         fired_at: str,
         device_health: Optional[Any] = None,
-    ) -> None:
+    ) -> Dict[str, Any]:
         """
         Send initial escalation notification with inline keyboard:
         ['False alarm', 'Got it'].
-        If snapshot_device_id (or device_id) and ring_client are available,
-        fetches snapshot and sends via sendPhoto.
-        If snapshot fails or client is unavailable, falls back gracefully to sendMessage.
+        If snapshot_device_id (or device_id) and ring_client are available:
+        - Fetches snapshot honoring self.snapshot_timeout (default 4s).
+        - Archives snapshot to disk for local audit/dashboard.
+        - Delivers via sendPhoto.
+        If snapshot fails or client is unavailable:
+        - Falls back gracefully to sendMessage (zero alert drops).
+        Returns delivery metadata dictionary.
         """
         expected_by = format_expected_by(routine)
         health_state = format_health_state(routine, device_health)
@@ -429,19 +527,33 @@ class TelegramNotifier(Notifier):
         # Attempt snapshot capture if ring_client is available
         target_cam_id = getattr(routine, "snapshot_device_id", None) or getattr(routine, "device_id", None)
         photo_sent = False
+        saved_snapshot_path = None
 
         if self.ring_client and target_cam_id:
+            start_t = time.time()
             try:
                 now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-                photo_bytes = self.ring_client.get_snapshot(target_cam_id, timestamp_ms=now_ms)
+                photo_bytes = self.ring_client.get_snapshot(
+                    target_cam_id,
+                    timestamp_ms=now_ms,
+                    timeout=self.snapshot_timeout,
+                )
                 if photo_bytes:
+                    saved_snapshot_path = self._archive_snapshot(routine.routine_id, local_date, photo_bytes)
                     self.send_photo(
                         photo_bytes=photo_bytes,
                         caption=text,
                         reply_markup=keyboard,
                     )
                     photo_sent = True
-                    logger.info("Delivered snapshot-enriched escalation photo for routine '%s'", routine.routine_id)
+                    elapsed_ms = int((time.time() - start_t) * 1000)
+                    kb_size = len(photo_bytes) / 1024.0
+                    logger.info(
+                        "Delivered snapshot-enriched escalation photo (%.1f KB) for routine '%s' in %dms",
+                        kb_size,
+                        routine.routine_id,
+                        elapsed_ms,
+                    )
             except Exception as exc:
                 logger.warning(
                     "Snapshot capture/delivery failed for routine '%s' (%s): %s. Falling back to text-only alert.",
@@ -459,17 +571,27 @@ class TelegramNotifier(Notifier):
             }
             self._make_request("sendMessage", payload)
 
+        return {
+            "channel": "telegram",
+            "delivered": True,
+            "type": "photo" if photo_sent else "text",
+            "has_photo": photo_sent,
+            "snapshot_path": saved_snapshot_path,
+            "caption": text,
+        }
+
     def send_reminder(
         self,
         routine: Routine,
         local_date: str,
         fired_at: str,
         device_health: Optional[Any] = None,
-    ) -> None:
+    ) -> Dict[str, Any]:
         """
         Send reminder notification for unacknowledged escalation with inline keyboard.
         If ring_client and camera are available, also attempts snapshot photo.
         Falls back gracefully to sendMessage.
+        Returns delivery metadata dictionary.
         """
         expected_by = format_expected_by(routine)
         health_state = format_health_state(routine, device_health)
@@ -506,19 +628,33 @@ class TelegramNotifier(Notifier):
         # Attempt snapshot capture for reminder as well
         target_cam_id = getattr(routine, "snapshot_device_id", None) or getattr(routine, "device_id", None)
         photo_sent = False
+        saved_snapshot_path = None
 
         if self.ring_client and target_cam_id:
+            start_t = time.time()
             try:
                 now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-                photo_bytes = self.ring_client.get_snapshot(target_cam_id, timestamp_ms=now_ms)
+                photo_bytes = self.ring_client.get_snapshot(
+                    target_cam_id,
+                    timestamp_ms=now_ms,
+                    timeout=self.snapshot_timeout,
+                )
                 if photo_bytes:
+                    saved_snapshot_path = self._archive_snapshot(routine.routine_id, local_date, photo_bytes)
                     self.send_photo(
                         photo_bytes=photo_bytes,
                         caption=text,
                         reply_markup=keyboard,
                     )
                     photo_sent = True
-                    logger.info("Delivered snapshot-enriched reminder photo for routine '%s'", routine.routine_id)
+                    elapsed_ms = int((time.time() - start_t) * 1000)
+                    kb_size = len(photo_bytes) / 1024.0
+                    logger.info(
+                        "Delivered snapshot-enriched reminder photo (%.1f KB) for routine '%s' in %dms",
+                        kb_size,
+                        routine.routine_id,
+                        elapsed_ms,
+                    )
             except Exception as exc:
                 logger.warning(
                     "Snapshot capture/delivery failed for reminder on routine '%s' (%s): %s. Falling back to text-only alert.",
@@ -535,6 +671,15 @@ class TelegramNotifier(Notifier):
                 "reply_markup": keyboard,
             }
             self._make_request("sendMessage", payload)
+
+        return {
+            "channel": "telegram",
+            "delivered": True,
+            "type": "photo" if photo_sent else "text",
+            "has_photo": photo_sent,
+            "snapshot_path": saved_snapshot_path,
+            "caption": text,
+        }
 
     def get_updates(self, offset: Optional[int] = None, timeout: int = 0) -> List[Dict[str, Any]]:
         """

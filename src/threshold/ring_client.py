@@ -157,6 +157,7 @@ class RingClient:
         include_auth: bool = True,
         follow_redirects: bool = True,
         max_retries: int = 3,
+        timeout: Optional[float] = None,
     ) -> Tuple[int, Dict[str, str], bytes]:
         """
         Execute HTTP request with 429 exponential backoff, error mapping, and token redaction.
@@ -187,6 +188,7 @@ class RingClient:
 
         attempt = 0
         backoff_base = 1.0
+        req_timeout = self.timeout if timeout is None else float(timeout)
 
         while True:
             attempt += 1
@@ -199,7 +201,7 @@ class RingClient:
                 opener = urllib.request.build_opener()
 
             try:
-                with opener.open(req, timeout=self.timeout) as resp:
+                with opener.open(req, timeout=req_timeout) as resp:
                     status = resp.status if hasattr(resp, "status") else resp.getcode()
                     resp_headers = dict(resp.headers)
                     resp_bytes = resp.read()
@@ -345,7 +347,12 @@ class RingClient:
         data = json.loads(body_bytes.decode("utf-8"))
         return data.get("data", [])
 
-    def get_snapshot(self, device_id: str, timestamp_ms: int) -> bytes:
+    def get_snapshot(
+        self,
+        device_id: str,
+        timestamp_ms: Union[int, float],
+        timeout: Optional[float] = None,
+    ) -> bytes:
         """
         Download snapshot image for device at timestamp.
         Two-step flow:
@@ -367,6 +374,7 @@ class RingClient:
             body=body,
             include_auth=True,
             follow_redirects=False,
+            timeout=timeout,
         )
 
         location_url = headers.get("Location") or headers.get("location")
@@ -387,6 +395,7 @@ class RingClient:
             body=None,
             include_auth=False,  # CRITICAL: Do NOT send Ring token to download host
             follow_redirects=True,
+            timeout=timeout,
         )
 
         if not img_bytes:

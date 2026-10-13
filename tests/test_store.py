@@ -31,6 +31,7 @@ from src.threshold.store import (
     save_routine,
     set_snooze,
     to_iso_timestamp,
+    update_escalation_snapshot,
     update_routine_last_satisfied,
     upsert_device_health,
 )
@@ -394,6 +395,45 @@ class TestSQLiteStore(unittest.TestCase):
 
         corrs = list_corrections(self.conn)
         self.assertTrue(any(c["id"] == "corr_test_1" for c in corrs))
+
+    def test_update_escalation_snapshot(self):
+        """update_escalation_snapshot updates snapshot_status and snapshot_path on the escalation row."""
+        save_routine(
+            self.conn,
+            routine_id="rt_snap_store",
+            property_id="prop_snap",
+            name="Snapshot Store Test",
+            device_id="sensor_snap",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        record_escalation(
+            self.conn,
+            routine_id="rt_snap_store",
+            local_date="2026-10-12",
+            fired_at="2026-10-12T14:35:00Z",
+        )
+
+        esc = get_escalation(self.conn, "rt_snap_store", "2026-10-12")
+        self.assertIsNotNone(esc)
+        self.assertIsNone(esc["snapshot_status"])
+        self.assertIsNone(esc["snapshot_path"])
+
+        update_escalation_snapshot(
+            self.conn,
+            routine_id="rt_snap_store",
+            local_date="2026-10-12",
+            status="photo",
+            path="snapshots/rt_snap_store_2026-10-12.jpg",
+        )
+
+        esc_updated = get_escalation(self.conn, "rt_snap_store", "2026-10-12")
+        self.assertIsNotNone(esc_updated)
+        self.assertEqual(esc_updated["snapshot_status"], "photo")
+        self.assertEqual(esc_updated["snapshot_path"], "snapshots/rt_snap_store_2026-10-12.jpg")
 
 
 if __name__ == "__main__":

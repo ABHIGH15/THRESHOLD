@@ -14,6 +14,7 @@ import sys
 from scripts.probe_ring import load_env
 from src.threshold.config import find_config_file, load_config_file, seed_routines_from_config, ThresholdConfig
 from src.threshold.daemon import DaemonConfig, ThresholdDaemon
+from src.threshold.models import Routine
 from src.threshold.notifier import ConsoleNotifier, TelegramNotifier
 from src.threshold.ring_client import RingAPIError, RingClient, TokenExpired
 from src.threshold.store import init_db, ms_to_iso
@@ -250,6 +251,121 @@ def run_daemon_command(args: argparse.Namespace) -> int:
     return daemon.run(max_ticks=max_ticks)
 
 
+def run_test_alert_command(args: argparse.Namespace) -> int:
+    """Send an immediate test escalation alert with snapshot enrichment to Telegram/Console."""
+    load_env(".env")
+
+    # Load config if available to get routine definitions
+    config_path = find_config_file(args.config)
+    cfg: Optional[ThresholdConfig] = None
+    if config_path:
+        try:
+            cfg = load_config_file(config_path)
+        except Exception as exc:
+            print(f"[WARN] Failed to load config file: {exc}", file=sys.stderr)
+
+    # Pick a routine
+    routine_obj = None
+    if cfg and cfg.routines:
+        if args.routine:
+            matching = [r for r in cfg.routines if r.id == args.routine]
+            if matching:
+                r_cfg = matching[0]
+                routine_obj = Routine(
+                    property_id=cfg.household,
+                    name=r_cfg.name,
+                    device_id=r_cfg.device_id,
+                    expected_event_type="motion_detected",
+                    window_start=r_cfg.window_start,
+                    window_end=r_cfg.window_end,
+                    timezone=cfg.timezone,
+                    days=r_cfg.days,
+                    escalation_delay_minutes=r_cfg.escalation_delay_minutes,
+                    snapshot_device_id=r_cfg.snapshot_device_id,
+                )
+                routine_obj.routine_id = r_cfg.id
+        if not routine_obj:
+            r_cfg = cfg.routines[0]
+            routine_obj = Routine(
+                property_id=cfg.household,
+                name=r_cfg.name,
+                device_id=r_cfg.device_id,
+                expected_event_type="motion_detected",
+                window_start=r_cfg.window_start,
+                window_end=r_cfg.window_end,
+                timezone=cfg.timezone,
+                days=r_cfg.days,
+                escalation_delay_minutes=r_cfg.escalation_delay_minutes,
+                snapshot_device_id=r_cfg.snapshot_device_id,
+            )
+            routine_obj.routine_id = r_cfg.id
+
+    if not routine_obj:
+        routine_obj = Routine(
+            property_id="Household",
+            name="Morning Medicine",
+            device_id="sensor_cabinet",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone="America/Chicago",
+            days=["mon", "tue", "wed", "thu", "fri"],
+            escalation_delay_minutes=30,
+            snapshot_device_id=args.camera if hasattr(args, "camera") else None,
+        )
+        routine_obj.routine_id = "rt_medicine"
+
+    # Set up Ring client
+    ring_client = None
+    token = os.environ.get("RING_ACCESS_TOKEN") or os.environ.get("RING_TOKEN")
+    if token and token.strip() and not args.no_photo:
+        ring_client = RingClient(access_token=token.strip())
+
+    # Set up Notifier
+    tg_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    tg_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if tg_token and tg_chat_id and tg_token.strip() and tg_chat_id.strip():
+        notifier = TelegramNotifier(
+            bot_token=tg_token.strip(),
+            chat_id=tg_chat_id.strip(),
+            ring_client=ring_client,
+        )
+        target_name = f"Telegram (chat_id: {tg_chat_id})"
+    else:
+        notifier = ConsoleNotifier(ring_client=ring_client)
+        target_name = "Console (stdout)"
+
+    print("=" * 80)
+    print("THRESHOLD TEST ALERT DISPATCH")
+    print("=" * 80)
+    print(f"Target:        {target_name}")
+    print(f"Routine:       {routine_obj.name} (id: {routine_obj.routine_id})")
+    print(f"Sensor Device: {routine_obj.device_id}")
+    print(f"Camera Device: {routine_obj.snapshot_device_id or '(none)'}")
+    print("-" * 80)
+
+    now_utc = datetime.now(timezone.utc)
+    now_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    local_date = now_utc.strftime("%Y-%m-%d")
+
+    try:
+        res = notifier.send_escalation(
+            routine=routine_obj,
+            local_date=local_date,
+            fired_at=now_iso,
+        )
+        print("\n[OK] Test alert successfully dispatched!")
+        if isinstance(res, dict):
+            print(f"Channel:       {res.get('channel')}")
+            print(f"Alert Type:    {res.get('type')}")
+            if res.get("snapshot_path"):
+                print(f"Saved Image:   {res.get('snapshot_path')}")
+        return 0
+    except Exception as exc:
+        print(f"\n[FAIL] Test alert delivery failed: {exc}", file=sys.stderr)
+        return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m src.threshold",
@@ -281,6 +397,16 @@ def main() -> int:
     seed_parser.add_argument("--verify-devices", action="store_true", help="Verify device IDs against Ring Partner API")
     seed_parser.add_argument("--purge", action="store_true", help="Delete existing routines in DB that are not present in config")
 
+    # test-alert
+    alert_parser = subparsers.add_parser(
+        "test-alert",
+        help="Dispatch a test escalation alert (with live snapshot if available) to Telegram or Console",
+    )
+    alert_parser.add_argument("--config", "-c", default=None, help="Path to JSON config file (default: threshold.json)")
+    alert_parser.add_argument("--routine", "-r", default=None, help="Specific routine ID to test (default: first routine)")
+    alert_parser.add_argument("--camera", default=None, help="Explicit snapshot camera device ID override")
+    alert_parser.add_argument("--no-photo", action="store_true", help="Force text-only alert (disable snapshot)")
+
     # run (daemon)
     run_parser = subparsers.add_parser(
         "run",
@@ -303,6 +429,8 @@ def main() -> int:
         return run_ring_check()
     elif args.subcommand == "seed":
         return run_seed_command(args)
+    elif args.subcommand == "test-alert":
+        return run_test_alert_command(args)
     elif args.subcommand == "run":
         return run_daemon_command(args)
     else:

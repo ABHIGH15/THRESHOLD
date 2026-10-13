@@ -1019,3 +1019,41 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
   - `test_console_notifier_displays_snapshot_device`: Verifies console output contains snapshot camera ID.
 - **Total Test Suite:** **148 tests passing** (`python3 -m unittest discover tests -v`) in $\approx 23.7$ seconds with 0 third-party pip dependencies.
 
+---
+
+### Priority 3b: Enhanced Snapshot Pipeline — Archiving, MIME Validation, Caption Truncation, Timeout Protection, SQLite Tracking, & Test-Alert CLI
+
+#### 1. Enhancements Implemented
+- **Snapshot Archiving to Local Disk (`_archive_snapshot`)**:
+  - Automatically saves incoming JPEG snapshots to disk under `snapshots/{routine_id}_{local_date}.jpg` and `snapshots/{routine_id}_latest.jpg`.
+  - Solves the problem of pre-signed CDN URL expiration (~15m lifetime) and provides permanent evidentiary audit trails for caregivers and local dashboard thumbnails.
+- **MIME Detection & Binary Validation (`detect_image_mime`)**:
+  - Validates image magic bytes via pure standard library: JPEG (`\xFF\xD8`), PNG (`\x89PNG\r\n\x1a\n`), WebP (`RIFF...WEBP`).
+  - `send_photo` validates binary payloads $\ge 32$ bytes and confirms magic bytes before dispatching HTTP multipart POST, preventing Telegram API 400 Bad Request rejections on corrupted media.
+- **Strict Telegram Caption Limit Enforcer (`truncate_caption`)**:
+  - Enforces Telegram's hard 1024-character caption limit for `sendPhoto` (unlike 4096 characters for `sendMessage`).
+  - Preserves HTML markup integrity: inspects and properly closes unclosed `<i>` tags when truncated, preventing Telegram entity parse errors.
+- **Latency Protection & Timeout Forwarding (`snapshot_timeout`)**:
+  - Added configurable `snapshot_timeout: float = 4.0` in `TelegramNotifier`.
+  - Ring camera snapshot capture is bounded to 4.0s max. If Ring API stalls, the system immediately drops the snapshot and delivers the text alert, ensuring zero delay in elderly absence alerts.
+  - Forwarded `timeout: Optional[float] = None` down through `RingClient._request()` and `RingClient.get_snapshot()`.
+- **SQLite Escalation Snapshot Tracking (`update_escalation_snapshot`)**:
+  - Added `snapshot_status TEXT` and `snapshot_path TEXT` columns to `escalations` table with backward-compatible `ALTER TABLE` migrations in `init_db()`.
+  - `run_scheduler_tick()` updates escalation records with delivery status (`photo` vs `text`) and local file path.
+- **`test-alert` CLI Subcommand (`python3 -m src.threshold test-alert`)**:
+  - Dispatches an immediate test escalation alert with snapshot enrichment to Telegram or Console.
+  - Accepts `--config`, `--routine`, `--camera`, and `--no-photo` flags for instant verification without waiting for a scheduled routine miss.
+- **Structured Delivery Metadata**:
+  - `send_escalation()` and `send_reminder()` return a rich metadata dictionary (`{"channel": "telegram"|"console", "delivered": True, "type": "photo"|"text", "has_photo": bool, "snapshot_path": str, "caption": str}`).
+
+#### 2. Automated Test Verification
+- Added 7 new tests across `tests/test_notifier.py` and `tests/test_store.py`:
+  - `test_detect_image_mime`: Verifies correct identification of JPEG, PNG, WebP, and application/octet-stream fallback.
+  - `test_truncate_caption`: Verifies caption length restriction to $\le 1024$ chars and unclosed HTML `<i>` tag closure.
+  - `test_send_photo_rejects_corrupt_or_empty_bytes`: Verifies `ValueError` rejection on empty, < 32 bytes, or non-image binaries.
+  - `test_send_escalation_honors_snapshot_timeout`: Verifies snapshot timeout parameter is forwarded to Ring client.
+  - `test_send_escalation_archives_snapshot_to_disk`: Verifies snapshot binary written to `{routine_id}_{date}.jpg` and `{routine_id}_latest.jpg`.
+  - `test_cli_test_alert_command`: Verifies CLI `test-alert` subcommand execution.
+  - `test_update_escalation_snapshot`: Verifies `snapshot_status` and `snapshot_path` columns updated in SQLite.
+- **Total Test Suite:** **155 tests passing** (`python3 -m unittest discover tests -v`) in $\approx 27.1$ seconds with 0 third-party pip dependencies.
+
