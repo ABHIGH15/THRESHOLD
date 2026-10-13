@@ -58,7 +58,7 @@ def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
     Create and configure a SQLite connection with WAL mode and foreign keys enabled.
     """
     path = db_path or get_db_path()
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA journal_mode = WAL;")
@@ -135,6 +135,8 @@ def init_db(conn_or_path: Optional[Union[sqlite3.Connection, str]] = None) -> sq
     """Initialize database tables and indexes."""
     if isinstance(conn_or_path, sqlite3.Connection):
         conn = conn_or_path
+        if conn.row_factory is None:
+            conn.row_factory = sqlite3.Row
     else:
         conn = get_connection(conn_or_path)
 

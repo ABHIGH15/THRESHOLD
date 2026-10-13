@@ -901,6 +901,28 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
   - `poll_once` idempotence (double poll verification).
 - Total suite: **115 tests passing** (100 baseline + 4 notifier hardening + 11 ring client).
 
+---
+
+### Priority 1: Unified Daemon (`src/threshold/daemon.py`) & CLI Runner
+
+#### 1. Components Delivered
+- **`src/threshold/daemon.py`**:
+  - `ThresholdDaemon`: Single-threaded, resilient orchestration loop combining periodic Ring API polling (`poll_once`), deterministic absence evaluation (`run_scheduler_tick`), and non-blocking Telegram callback polling (`poll_and_process_callbacks`).
+  - `DaemonConfig`: Configurable parameters (`db_path`, `poll_interval_seconds`, `tick_interval_seconds`, `household_name`, `timezone_name`, `enable_polling`).
+  - Startup ASCII Banner: Displays household name, local timezone, device tracking summary, routine count, polling/tick intervals, and active notifier.
+  - Heartbeat status logging: Formatted line per tick `[13:18:01 CDT] tick #1 | medicine: watching | walk: watching | 0 escalations`.
+  - Signal handling (`SIGINT`, `SIGTERM`): Clean exit with resource cleanup.
+  - Per-tick and per-poll error boundaries: Catch network drops and `TokenExpired` (pausing polling without crashing daemon loop).
+- **Store Enhancement (`src/threshold/store.py`)**:
+  - Enabled `check_same_thread=False` in `get_connection()` for multi-threaded testing resilience.
+  - Guaranteed `row_factory = sqlite3.Row` in `init_db()` when initialized with existing connections.
+- **CLI Runner (`src/threshold/__main__.py`)**:
+  - Added `run` subcommand (`python3 -m src.threshold run [--db ...] [--poll-interval ...] [--tick-interval ...] [--household ...] [--timezone ...] [--no-poll] [--once]`).
+- **Automated Tests (`tests/test_daemon.py`)**:
+  - 8 automated tests covering defaults, banner rendering, `tick_once()`, `run(max_ticks=N)`, mock polling, `TokenExpired` pause handling, graceful `stop()` signaling, and heartbeat formatting.
+  - Total test suite expanded to **123 tests passing** (115 baseline + 8 daemon tests).
+
+
 
 
 

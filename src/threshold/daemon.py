@@ -1,0 +1,257 @@
+"""
+Threshold Background Daemon (src/threshold/daemon.py).
+
+Provides a single-threaded, resilient orchestration loop combining:
+1. Periodic Ring Partner API poller (poll_once).
+2. Deterministic absence scheduler evaluation (run_scheduler_tick).
+3. Telegram callback polling and caretaker corrections loop.
+4. Signal handling (SIGINT, SIGTERM) for graceful shutdown.
+5. Error boundaries around all network and evaluation ticks.
+"""
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
+import logging
+import os
+import signal
+import sqlite3
+import sys
+import time
+from typing import Any, Dict, List, Optional, Union
+
+from src.threshold.models import Routine
+from src.threshold.notifier import ConsoleNotifier, Notifier, TelegramNotifier
+from src.threshold.ring_client import RingAPIError, RingClient, TokenExpired, poll_once
+from src.threshold.scheduler import Clock, RealClock, run_scheduler_tick
+from src.threshold.store import init_db, list_routines
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DaemonConfig:
+    """Configuration options for ThresholdDaemon."""
+
+    db_path: str = "threshold.db"
+    poll_interval_seconds: float = 300.0  # 5 minutes
+    tick_interval_seconds: float = 60.0  # 1 minute
+    household_name: str = "Threshold Household"
+    timezone_name: str = "UTC"
+    staleness_threshold_minutes: int = 120
+    reminder_delay_minutes: int = 15
+    enable_polling: bool = True
+
+
+def format_local_time(dt: datetime, tz_name: str) -> str:
+    """Format datetime in local timezone string."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        local_dt = dt.astimezone(ZoneInfo(tz_name))
+        return local_dt.strftime("%H:%M:%S %Z")
+    except Exception:
+        return dt.strftime("%H:%M:%S UTC")
+
+
+class ThresholdDaemon:
+    """
+    Unified background daemon for Threshold.
+    Runs single-threaded loop with signal handling and error boundaries.
+    """
+
+    def __init__(
+        self,
+        config: Optional[DaemonConfig] = None,
+        ring_client: Optional[RingClient] = None,
+        notifier: Optional[Notifier] = None,
+        conn: Optional[sqlite3.Connection] = None,
+        clock: Optional[Clock] = None,
+    ):
+        self.config = config or DaemonConfig()
+        self.clock = clock or RealClock()
+        self._owns_conn = False
+
+        if conn is not None:
+            self.conn = conn
+        else:
+            self.conn = init_db(self.config.db_path)
+            self._owns_conn = True
+
+        self.ring_client = ring_client
+        self.notifier = notifier or ConsoleNotifier()
+
+        self.shutdown_requested = False
+        self.polling_paused = False
+        self.tick_count = 0
+        self.poll_count = 0
+
+    def stop(self) -> None:
+        """Signal the daemon to stop gracefully."""
+        self.shutdown_requested = True
+
+    def build_startup_banner(self) -> str:
+        """Generate formatted startup banner."""
+        routines = list_routines(self.conn)
+        routine_count = len(routines)
+
+        # Count devices
+        cur = self.conn.execute("SELECT COUNT(*), SUM(CASE WHEN online = 1 THEN 1 ELSE 0 END) FROM device_health")
+        row = cur.fetchone()
+        dev_total = row[0] if row else 0
+        dev_online = row[1] if row and row[1] is not None else 0
+
+        dev_summary = f"{dev_total} tracked ({dev_online} online)" if dev_total > 0 else "0 tracked (awaiting poll)"
+        routines_summary = f"{routine_count} loaded"
+
+        notifier_type = type(self.notifier).__name__
+        poll_str = f"every {int(self.config.poll_interval_seconds)}s" if self.config.enable_polling and self.ring_client else "disabled"
+        tick_str = f"every {int(self.config.tick_interval_seconds)}s"
+
+        banner = (
+            "╔══════════════════════════════════════════════════════════════╗\n"
+            "║  THRESHOLD v1.0 — Pattern Absence Detection for Elderly Care ║\n"
+            "╠══════════════════════════════════════════════════════════════╣\n"
+            f"║  Household:  {self.config.household_name:<47}║\n"
+            f"║  Timezone:   {self.config.timezone_name:<47}║\n"
+            f"║  Devices:    {dev_summary:<47}║\n"
+            f"║  Routines:   {routines_summary:<47}║\n"
+            f"║  Polling:    {poll_str:<15} | Ticking: {tick_str:<18}║\n"
+            f"║  Notifier:   {notifier_type:<47}║\n"
+            "╚══════════════════════════════════════════════════════════════╝"
+        )
+        return banner
+
+    def tick_once(self, now: Optional[datetime] = None) -> Dict[str, Any]:
+        """Execute a single scheduler evaluation tick."""
+        if now is None:
+            now = self.clock.now()
+
+        res = run_scheduler_tick(
+            conn=self.conn,
+            notifier=self.notifier,
+            now=now,
+            staleness_threshold_minutes=self.config.staleness_threshold_minutes,
+            reminder_delay_minutes=self.config.reminder_delay_minutes,
+        )
+        self.tick_count += 1
+        return res
+
+    def poll_once(self, now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+        """Execute a single Ring API poll if client is available and polling not paused."""
+        if not self.config.enable_polling or not self.ring_client or self.polling_paused:
+            return None
+
+        if now is None:
+            now = self.clock.now()
+
+        try:
+            res = poll_once(self.conn, self.ring_client, now)
+            self.poll_count += 1
+            return res
+        except TokenExpired:
+            self.polling_paused = True
+            logger.warning("[WARN] Ring access token expired (HTTP 401). Polling paused until refreshed.")
+            print("\n[WARN] Ring access token expired (HTTP 401). Polling paused until refreshed.", file=sys.stderr)
+            return None
+        except RingAPIError as e:
+            logger.warning("[WARN] Ring API error during poll: %s", e)
+            print(f"\n[WARN] Ring API poll error (continuing): {e}", file=sys.stderr)
+            return None
+        except Exception as e:
+            logger.warning("[WARN] Unexpected poll exception: %s", e)
+            print(f"\n[WARN] Unexpected poll error (continuing): {e}", file=sys.stderr)
+            return None
+
+    def format_heartbeat(self, tick_result: Dict[str, Any], now: datetime) -> str:
+        """Format heartbeat status line for terminal output."""
+        time_str = format_local_time(now, self.config.timezone_name)
+        statuses = tick_result.get("statuses", {})
+        new_esc = tick_result.get("new_escalations", 0)
+
+        status_parts = []
+        for r_id, st in statuses.items():
+            short_id = r_id[-12:] if len(r_id) > 12 else r_id
+            badge = "✓" if st == "observed" else ("⚠" if st == "missed" else "")
+            status_parts.append(f"{short_id}: {st} {badge}".strip())
+
+        status_str = " | ".join(status_parts) if status_parts else "no routines"
+        esc_str = f"{new_esc} new escalation(s)" if new_esc > 0 else "0 escalations"
+        return f"[{time_str}] tick #{self.tick_count:<3} | {status_str} | {esc_str}"
+
+    def run(self, max_ticks: Optional[int] = None) -> int:
+        """
+        Run the main daemon orchestration loop.
+        Blocks until stop() is called, SIGINT/SIGTERM is received, or max_ticks is reached.
+        """
+        # Register signal handlers if in main thread
+        try:
+            def _sig_handler(signum, frame):
+                print(f"\n[SIGNAL] Received signal {signum}. Stopping Threshold daemon...")
+                self.stop()
+
+            signal.signal(signal.SIGINT, _sig_handler)
+            signal.signal(signal.SIGTERM, _sig_handler)
+        except (ValueError, AttributeError):
+            # Not in main thread (e.g. running in test runner)
+            pass
+
+        print(self.build_startup_banner())
+        print(f"\nThreshold daemon started. Press Ctrl+C to stop.\n")
+
+        # Initial poll
+        if self.config.enable_polling and self.ring_client:
+            print("[DAEMON] Performing initial device and event history poll...")
+            poll_res = self.poll_once()
+            if poll_res:
+                print(f"[DAEMON] Initial poll complete: {poll_res.get('devices_polled', 0)} device(s) polled, {poll_res.get('events_ingested', 0)} event(s) ingested.\n")
+
+        last_poll_time = time.monotonic()
+        last_tick_time = 0.0  # Trigger immediate first tick
+
+        try:
+            while not self.shutdown_requested:
+                now_mono = time.monotonic()
+                now_dt = self.clock.now()
+
+                # Check if it's time for a scheduler tick
+                if (now_mono - last_tick_time) >= self.config.tick_interval_seconds or last_tick_time == 0.0:
+                    try:
+                        tick_res = self.tick_once(now_dt)
+                        heartbeat = self.format_heartbeat(tick_res, now_dt)
+                        print(heartbeat)
+                    except Exception as e:
+                        logger.error("[ERROR] Exception in scheduler tick: %s", e, exc_info=True)
+                        print(f"[ERROR] Exception in scheduler tick (continuing): {e}", file=sys.stderr)
+
+                    last_tick_time = now_mono
+
+                    if max_ticks is not None and self.tick_count >= max_ticks:
+                        break
+
+                # Check if it's time for a Ring API poll
+                if self.config.enable_polling and self.ring_client and not self.polling_paused:
+                    if (now_mono - last_poll_time) >= self.config.poll_interval_seconds:
+                        poll_res = self.poll_once(now_dt)
+                        if poll_res:
+                            p_time = format_local_time(now_dt, self.config.timezone_name)
+                            print(f"[{p_time}] poll     | {poll_res.get('events_ingested', 0)} new event(s) | {poll_res.get('devices_polled', 0)} device(s) checked")
+                        last_poll_time = now_mono
+
+                # Responsive sleep: sleep in 0.5s increments while checking shutdown flag
+                sleep_accum = 0.0
+                step = 0.5
+                target_sleep = min(1.0, self.config.tick_interval_seconds)
+                while sleep_accum < target_sleep and not self.shutdown_requested:
+                    time.sleep(step)
+                    sleep_accum += step
+
+        finally:
+            print("[SHUTDOWN] Threshold daemon stopped cleanly.")
+            if self._owns_conn:
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+
+        return 0

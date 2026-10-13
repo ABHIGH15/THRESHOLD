@@ -12,6 +12,8 @@ import os
 import sys
 
 from scripts.probe_ring import load_env
+from src.threshold.daemon import DaemonConfig, ThresholdDaemon
+from src.threshold.notifier import ConsoleNotifier, TelegramNotifier
 from src.threshold.ring_client import RingAPIError, RingClient, TokenExpired
 from src.threshold.store import ms_to_iso
 
@@ -90,6 +92,43 @@ def run_ring_check() -> int:
     return 0
 
 
+def run_daemon_command(args: argparse.Namespace) -> int:
+    """Execute daemon background service."""
+    load_env(".env")
+
+    # Ring Client setup
+    token = os.environ.get("RING_ACCESS_TOKEN") or os.environ.get("RING_TOKEN")
+    ring_client = None
+    if token and token.strip() and not args.no_poll:
+        ring_client = RingClient(access_token=token.strip())
+
+    # Notifier setup
+    tg_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    tg_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if tg_token and tg_chat_id and tg_token.strip() and tg_chat_id.strip():
+        notifier = TelegramNotifier(bot_token=tg_token.strip(), chat_id=tg_chat_id.strip())
+    else:
+        notifier = ConsoleNotifier()
+
+    config = DaemonConfig(
+        db_path=args.db,
+        poll_interval_seconds=float(args.poll_interval),
+        tick_interval_seconds=float(args.tick_interval),
+        household_name=args.household,
+        timezone_name=args.timezone,
+        enable_polling=not args.no_poll,
+    )
+
+    daemon = ThresholdDaemon(
+        config=config,
+        ring_client=ring_client,
+        notifier=notifier,
+    )
+
+    max_ticks = 1 if args.once else None
+    return daemon.run(max_ticks=max_ticks)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m src.threshold",
@@ -103,10 +142,25 @@ def main() -> int:
         help="Check Ring Partner API devices, status, and recent event history",
     )
 
+    # run (daemon)
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Run the Threshold background service daemon",
+    )
+    run_parser.add_argument("--db", default="threshold.db", help="Path to SQLite database (default: threshold.db)")
+    run_parser.add_argument("--poll-interval", type=float, default=300.0, help="Ring poll interval in seconds (default: 300)")
+    run_parser.add_argument("--tick-interval", type=float, default=60.0, help="Scheduler tick interval in seconds (default: 60)")
+    run_parser.add_argument("--household", default="Threshold Household", help="Household name for dashboard/alerts")
+    run_parser.add_argument("--timezone", default="America/Chicago", help="Local timezone name (default: America/Chicago)")
+    run_parser.add_argument("--no-poll", action="store_true", help="Disable Ring API polling (scheduler only)")
+    run_parser.add_argument("--once", action="store_true", help="Execute single cycle and exit")
+
     args = parser.parse_args()
 
     if args.subcommand == "ring-check":
         return run_ring_check()
+    elif args.subcommand == "run":
+        return run_daemon_command(args)
     else:
         parser.print_help()
         return 0
