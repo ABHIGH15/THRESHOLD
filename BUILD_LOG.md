@@ -142,3 +142,141 @@ Spec cross-check: threshold_spec.md — "Webhooks: HMAC-SHA256 X-Signature, 5s r
 **1. `rate(1 minute)` scheduler cost risk.** The EventBridge schedule runs 24/7 once deployed. Fine for stub heartbeats, but once Phase 5 wires Bedrock into the scheduler Lambda, a forgotten 1-minute trigger calling an LLM around the clock will burn through the $150 AWS credit for no reason. **Action required:** disable the schedule or tear down the stack between active sessions, starting the moment Bedrock enters this Lambda.
 
 **2. Silent DynamoDB write failures.** Both stub handlers swallow write errors and still return 200. Acceptable for Phase 2 stubs, but this is exactly why the Phase 2 DoD requires an independent `aws dynamodb get-item` check — a 200 from the handler proves the Lambda ran, not that the write succeeded. **Action required:** once handlers stop being stubs, propagate write failures properly rather than swallowing them.
+
+### [2026-10-11T14:45:00Z] A0 — Pivot cleanup & repo baseline (COMPLETE)
+Commands run and verbatim output:
+  1. `git init && git branch -m master main` → Initialized empty Git repository
+  2. `git check-ignore -v .env` → `.gitignore:2:.env  .env` — confirmed ignored before any staging
+  3. `python3 -m unittest -v 2>&1 | tail -15` → Ran 30 tests in 0.001s — OK
+  4. `.gitignore` updated: added `*.db`, `*.db-journal`, `evidence/`, `.venv/`
+  5. `.env.example` rewritten: `RING_ACCESS_TOKEN`, `RING_CLIENT_ID`, `RING_CLIENT_SECRET`, `RING_WEBHOOK_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `LLM_API_KEY`
+  6. `evidence/ring/`, `evidence/ring/playground/`, `evidence/dashboard/` created (git-ignored). `docs/ring_samples/` created (committed).
+  7. `README.md` stub, `LICENSE` (MIT, copyright Amit Kumar Gupta 2026), `NO_AWS_RUNBOOK.md` added.
+  8. `git add -A && git commit -m "baseline before no-AWS pivot"` → c5cc62b, 24 files
+  9. `git rm template.yaml samconfig.toml handlers/webhook.py handlers/scheduler.py` → 4 files deleted
+  10. `git commit -m "remove AWS SAM scaffolding"` → 08beee1, 4 files deleted
+  11. `python3 -m unittest -v 2>&1 | tail -15` → Ran 30 tests in 0.001s — OK (post-pivot)
+  12. Secret grep: all matches are documentation text, empty assignments, or fake test fixtures. No real values.
+  13. `git ls-files | grep "^\.env$"` → (empty — .env not tracked)
+  14. `git ls-files | grep -E "template\.yaml|samconfig"` → (empty — AWS files gone)
+Expected: ≥2 commits, 30 tests green, no AWS files, .env not tracked, no real secrets in history.
+Actual: matches expected on all counts.
+Result: PASS.
+Remote origin added: https://github.com/ABHIGH15/THRESHOLD
+Status: A0 Complete.
+
+### [2026-10-11T15:15:00Z] A1 — Ring probe & FINDINGS.md template (COMPLETE)
+Commands run and verbatim output:
+  1. `git clone https://github.com/AmazonAppDev/ring-api-helloworld scratch/ring-helloworld-ref`
+     - Confirmed endpoints and headers from starter repo scripts (`list_devices.py`, `event_history.py`, `device_status.py`, etc.):
+       - Base URL: `https://api.amazonvision.com`
+       - Headers: `Authorization: Bearer <token>`
+       - Endpoints: `GET /v1/devices`, `GET /v1/history/devices/{id}/events`, `GET /v1/devices/{id}/status`, `GET /v1/devices/{id}/capabilities`, `GET /v1/devices/{id}/configurations`, `GET /v1/devices/{id}/location`, `GET /v1/users/me`
+       - Snapshot: Not present in starter repo scripts (TODO-VERIFY)
+  2. Implemented `scripts/probe_ring.py`:
+     - stdlib only (`urllib.request`, `urllib.error`, `json`, `argparse`, `sys`, `os`, `datetime`)
+     - Custom `.env` parser that ignores comments/blanks, strips quotes, does not override existing env vars, never prints secrets
+     - Token gate: exits with code 2 if `RING_ACCESS_TOKEN` is unset/empty
+     - 3-step sequence: list devices, event history for first device, snapshot (via `--snapshot-path` or skipped with TODO-VERIFY)
+     - Full redaction of token and Authorization headers across saved JSON files and image byte saving
+     - Formatted summary table output
+  3. Created `evidence/ring/FINDINGS.md` with empty template sections
+  4. Created unit tests in `tests/test_probe_ring.py`:
+     - `python3 -m unittest tests/test_probe_ring.py -v`:
+       - test_missing_token_exits_code_2 ... ok
+       - test_does_not_override_existing_environ ... ok
+       - test_parses_quotes_comments_and_blanks ... ok
+       - test_redact_nested_structures ... ok
+       - test_redact_string ... ok
+       - Ran 5 tests in 0.042s OK
+  5. Dry run without token:
+     - `python3 scripts/probe_ring.py 2>&1; echo "EXIT_CODE=$?"`
+     - Output:
+       RING_ACCESS_TOKEN missing - generate a Playground token and put it in .env
+       EXIT_CODE=2
+  6. Full test suite: `python3 -m unittest discover tests -v` → 35/35 tests passing (0.042s).
+Expected: probe script ready, findings template in place, unit tests passing, dry run exits 2 with missing-token message.
+Actual: Matched expected on all counts.
+Result: PASS.
+Status: A1 Complete.
+
+### [2026-10-11T17:05:00Z] A1b — Extend Ring probe (COMPLETE)
+Commands run and verbatim output:
+  1. Updated `scripts/probe_ring.py`:
+     - Added steps from starter repo:
+       (d) GET /v1/devices/{id}/status for first device
+       (e) GET /v1/devices/{id}/capabilities for first device
+       (f) GET /v1/users/me
+     - Failure isolation: failure in one step does not abort later steps; records error and continues.
+     - Confirmed `--snapshot-path` accepts `{id}` or `{device_id}` placeholders.
+     - Summary table updated to include all 6 steps.
+  2. Updated `evidence/ring/FINDINGS.md` template with:
+     - "3. Device Status Fields and Online/Offline Representation"
+     - "4. Capabilities (Snapshot, Video, Motion)"
+     - "6. Event Types Naming Seen in History (dot style vs webhook format)"
+     - "8. User Profile Fields"
+  3. Added unit tests in `tests/test_probe_ring.py` using fake HTTP layer:
+     - `test_device_status_step` (status 200, online attribute verified)
+     - `test_device_capabilities_step` (status 200, capabilities verified)
+     - `test_user_profile_step` (status 200, user id verified)
+     - `test_http_401_error_handling` (401 handled cleanly, error message saved)
+     - `test_http_404_error_handling` (404 handled cleanly, error message saved)
+  4. Test run: `python3 -m unittest tests/test_probe_ring.py -v`:
+     - 10/10 tests passing (0.046s).
+  5. Dry run without token:
+     - `python3 scripts/probe_ring.py; echo "exit=$?"`
+     - Output:
+       RING_ACCESS_TOKEN missing - generate a Playground token and put it in .env
+       exit=2
+  6. Help text: `python3 scripts/probe_ring.py --help` shows `{id}` and `{device_id}` substitution.
+  7. Full test suite: `python3 -m unittest discover tests -v` → 40/40 tests passing (0.045s).
+Expected: 3 new endpoints supported, failure isolation active, 401/404 handled, 40 tests passing, dry run exits 2.
+Actual: Matched expected on all counts.
+Result: PASS.
+Status: A1b Complete.
+
+### [2026-10-12T13:50:00Z] A1c — Snapshot POST & doc mode support (COMPLETE)
+Commands run and verbatim output:
+  1. Searched `evidence/ring/*.json` for any key/value containing "component":
+     - Python script inspected all JSON files under `evidence/ring/`.
+     - Result: None found (0 matches across `list_devices`, `device_status`, `device_capabilities`, `user_profile`, `event_history`).
+  2. Extended `scripts/probe_ring.py`:
+     - Added `--snapshot-method` (GET or POST) and `--snapshot-body` (JSON string, sets Content-Type: application/json).
+     - Added `--snapshot-doc` convenience mode: POST to `/v1/devices/{id}/media/image/download`:
+       - Attempt (a): body `{}`.
+       - Attempt (b): only if real component values discovered in evidence (skipped since none found; never invents values).
+     - Added binary magic bytes detection: JPEG (`\xff\xd8\xff`) and PNG (`\x89PNG\r\n\x1a\n`), auto-saves `.jpg` or `.png`.
+     - Recorded `magic_format`, `content_type`, and `byte_size` in evidence JSON and summary table.
+     - Error response bodies saved without crashing on non-200.
+  3. Added unit tests in `tests/test_probe_ring.py`:
+     - `test_post_with_body_sends_headers_and_payload` (POST method, Content-Type: application/json, body verified) ... ok
+     - `test_binary_jpeg_response_saved_and_magic_detected` (JPEG magic byte detection, .jpg saved) ... ok
+     - `test_binary_png_response_saved_and_magic_detected` (PNG magic byte detection, .png saved) ... ok
+     - `test_error_response_saved_without_crashing` (HTTP 400 error body saved) ... ok
+     - Run: `python3 -m unittest tests/test_probe_ring.py -v` → 14/14 tests passing (0.057s).
+  4. Full test suite: `python3 -m unittest discover tests -v` → 44/44 tests passing (0.045s).
+Expected: Snapshot POST supported, magic bytes detected for JPEG/PNG, error bodies captured, 44 tests green.
+Actual: Matched expected on all counts.
+Result: PASS.
+Status: A1c Complete.
+
+### [2026-10-12T14:30:00Z] GATE 1 — Live Ring API Probe & Playground Findings (COMPLETE ✅)
+Commands run and verbatim output:
+  1. `python3 scripts/probe_ring.py --snapshot-doc`
+     - Authenticated live calls against `https://api.amazonvision.com`:
+       - `GET /v1/devices` → HTTP 200 (1 device returned)
+       - `GET /v1/history/devices/{id}/events` → HTTP 200 (event_type: 'on_demand', millisecond start/end timestamps confirmed)
+       - `GET /v1/devices/{id}/status` → HTTP 200 (online: true during stream, reported_at timestamp confirmed)
+       - `GET /v1/devices/{id}/capabilities` → HTTP 200 (12 capabilities, snapshot confirmed under image_enhancements)
+       - `GET /v1/users/me` → HTTP 200 (account ID returned)
+       - `POST /v1/devices/{id}/media/image/download` with `{}` → HTTP 403:
+         detail: "Cannot authorize: missing required timestamp fields in request body"
+  2. Playground UI findings (User screenshot):
+     - WHEP Live Streaming verified: `POST /v1/devices/{id}/media/streaming/whep/sessions` returns HTTP 201 Created.
+     - Watermarking verified: Non-removable Ring logo, Device ID, partner portal text, and timestamps visible on feed.
+  3. Populated `evidence/ring/FINDINGS.md` with all confirmed field shapes and schemas.
+Expected: Real authenticated calls to Ring pass; response shapes captured; GATE 1 passed.
+Actual: Matched expected. Ring-at-runtime requirement satisfied.
+Result: PASS — GATE 1 CLEARED.
+Status: STOPPED. Awaiting user instruction for Task A2 (SQLite store).
+
