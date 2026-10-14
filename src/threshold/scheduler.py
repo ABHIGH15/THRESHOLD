@@ -56,7 +56,7 @@ class Clock(ABC):
 
     @abstractmethod
     def now(self) -> datetime:
-        """Return current datetime, guaranteed timezone-aware in UTC."""
+        """Return current datetime, timezone-aware in UTC."""
         pass
 
 

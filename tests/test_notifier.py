@@ -13,6 +13,7 @@ Covers all 7 specified behaviors:
 """
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import http.server
 import json
 import logging
@@ -29,6 +30,7 @@ from src.threshold.notifier import (
     TelegramNotifier,
     detect_image_mime,
     encode_multipart_form_data,
+    make_callback_data,
     redact_telegram_token,
     truncate_caption,
 )
@@ -1146,6 +1148,82 @@ class TestNotifierSystem(unittest.TestCase):
         output = captured.getvalue()
         self.assertIn("THRESHOLD TEST ALERT DISPATCH", output)
         self.assertIn("Test alert successfully dispatched!", output)
+
+    def test_hashed_routine_id_in_callback_data_resolves_to_correct_routine(self):
+        """Hashed routine_id (>64 byte callback_data) resolves back to the original routine and acks escalation."""
+        long_routine_id = "routine_morning_hygiene_and_medication_check_elderly_parent_daily"
+        conn = get_connection(self.db_path)
+        save_routine(
+            conn=conn,
+            routine_id=long_routine_id,
+            property_id="prop_long",
+            name="Extended Morning Check",
+            device_id="sensor_cabinet_long",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon", "tue", "wed", "thu", "fri"],
+            escalation_delay_minutes=30,
+        )
+
+        local_date = "2026-10-12"
+        record_escalation(
+            conn=conn,
+            routine_id=long_routine_id,
+            local_date=local_date,
+            fired_at="2026-10-12T14:31:00Z",
+            notified_at="2026-10-12T14:31:05Z",
+        )
+
+        notifier = TelegramNotifier(
+            bot_token="test_tok",
+            chat_id="5551234",
+            base_url=self.base_url,
+        )
+
+        # Generate callback_data via make_callback_data
+        cb_data = make_callback_data("fa", long_routine_id, local_date)
+        expected_hash = hashlib.sha256(long_routine_id.encode("utf-8")).hexdigest()[:16]
+        self.assertEqual(cb_data, f"fa:{expected_hash}:{local_date}")
+        self.assertLessEqual(len(cb_data.encode("utf-8")), 64)
+
+        # Queue the callback update with the hashed data
+        self.server.queued_updates = [
+            {
+                "update_id": 901,
+                "callback_query": {
+                    "id": "cb_hashed_fa_1",
+                    "from": {"id": 5551234, "is_bot": False, "first_name": "Sarah"},
+                    "message": {"message_id": 100, "chat": {"id": 5551234}},
+                    "data": cb_data,
+                },
+            }
+        ]
+
+        # Process callbacks
+        processed = notifier.poll_and_process_callbacks(conn)
+
+        # Assert callback resolved to the full original routine_id
+        self.assertEqual(len(processed), 1)
+        self.assertEqual(processed[0]["type"], "false_alarm")
+        self.assertEqual(processed[0]["routine_id"], long_routine_id)
+        self.assertEqual(processed[0]["correction_id"], f"corr_{long_routine_id}_{local_date}")
+
+        # Assert escalation in DB was acknowledged
+        cur = conn.execute("SELECT acked_at FROM escalations WHERE routine_id = ?", (long_routine_id,))
+        row = cur.fetchone()
+        self.assertIsNotNone(row)
+        self.assertIsNotNone(row["acked_at"])
+
+        # Assert correction was recorded with the correct device_id
+        cur = conn.execute("SELECT * FROM corrections WHERE id = ?", (f"corr_{long_routine_id}_{local_date}",))
+        corr_row = cur.fetchone()
+        self.assertIsNotNone(corr_row)
+        self.assertEqual(corr_row["device_id"], "sensor_cabinet_long")
+        self.assertEqual(corr_row["label"], "false_alarm")
+
+        conn.close()
 
 
 class MockRingSnapshotClient:

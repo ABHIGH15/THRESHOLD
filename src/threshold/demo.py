@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -29,6 +30,7 @@ from src.threshold.dashboard import start_dashboard_server, DashboardServer
 from src.threshold.ingest import ingest_event
 from src.threshold.models import DeviceHealthRecord, Routine
 from src.threshold.notifier import (
+    format_escalation_text,
     format_expected_by,
     format_health_state,
     format_last_activity,
@@ -89,6 +91,7 @@ class DemoNotifier(Notifier):
         health_state = format_health_state(routine, device_health)
         last_act = format_last_activity(routine, device_health)
         snap_id = getattr(routine, "snapshot_device_id", None) or routine.device_id
+        alert_text = format_escalation_text(routine, fired_at, device_health)
 
         record = {
             "routine_id": r_id,
@@ -96,6 +99,7 @@ class DemoNotifier(Notifier):
             "local_date": local_date,
             "fired_at": fired_at,
             "snapshot_path": self.snapshot_path,
+            "alert_text": alert_text,
             "expected_by": expected_by,
             "health_state": health_state,
             "last_activity": last_act,
@@ -188,11 +192,17 @@ def print_header() -> None:
     print("  THRESHOLD — PATTERN-ABSENCE DETECTION FOR ELDERLY CARE")
     print("  'Ring tells you when something happens. Threshold tells you when something doesn't.'")
     print("=" * 86)
+    print("  Caregiver-support notification tool. Not an emergency or medical device.")
+    print("  Does not contact emergency services.")
+    print("  SIMULATED EVENTS. Times are simulated. The camera image is a real image from the")
+    print("  Ring Partner API sandbox.")
+    print("-" * 86)
     print("  Dallas, TX  |  Resident: Margaret (Age 82, living independently)")
-    print("  Hardware:   Ring Motion Sensor (Medicine Cabinet) + Ring Indoor Cam (Kitchen)")
+    print("  Hardware:   Ring Motion Sensor (Medicine Cabinet) + Playground Device (Camera)")
     print("              Ring Contact Sensor (Front Door)       + Ring Doorbell Cam (Porch)")
     print("  Stack:      Python Standard Library only + SQLite + Telegram + Ring Partner API")
-    print("  Cloud:      ZERO AWS • ZERO Cloud Costs • 100% Local Network Privacy")
+    print("  Cloud:      Runs on your own machine; no Threshold-operated cloud.")
+    print("              Data goes only to Ring (the source) and Telegram (alerts).")
     print("-" * 86)
 
 
@@ -232,13 +242,12 @@ def print_timeline_row(
 
 
 def print_phone_alert_card(alert_record: Dict[str, Any]) -> None:
-    """Print ASCII smartphone card showing the Telegram photo notification."""
-    routine_name = alert_record.get("routine_name", "Routine")
-    expected_by = alert_record.get("expected_by", "N/A")
-    health = alert_record.get("health_state", "Online")
-    cam = alert_record.get("snapshot_device_id", "cam_kitchen_indoor")
+    """Print smartphone card showing the ACTUAL alert text from the notifier formatting function."""
+    alert_text = alert_record.get("alert_text", "")
     snap_path = alert_record.get("snapshot_path", "snapshots/rt_morning_medicine_latest.jpg")
-    fired_at = alert_record.get("fired_at", "")
+
+    # Strip HTML tags for clean terminal display
+    plain_text = re.sub(r"<[^>]+>", "", alert_text) if alert_text else ""
 
     snap_size_kb = 0.0
     if snap_path and os.path.exists(snap_path):
@@ -248,43 +257,17 @@ def print_phone_alert_card(alert_record: Dict[str, Any]) -> None:
     print("  ╔" + "═" * 74 + "╗")
     print("  ║  📱 TELEGRAM NOTIFICATION RECEIVED ON CAREGIVER PHONE (Sarah)         ║")
     print("  ╠" + "═" * 74 + "╣")
-    print(f"  ║  📷 Attached Snapshot: {snap_path} ({snap_size_kb:.1f} KB JPEG){' ' * max(0, 74 - 31 - len(snap_path) - len(f'{snap_size_kb:.1f}'))} ║")
-    print("  ║                                                                          ║")
-    print(f"  ║  ⚠️  PATTERN ABSENCE DETECTED: {routine_name:<41} ║")
-    print(f"  ║  Expected by:     {expected_by:<54} ║")
-    print(f"  ║  Sensor State:    {health:<54} ║")
-    print(f"  ║  Last Activity:   None recorded within window (07:00–09:00 CDT)          ║")
-    print(f"  ║  Snapshot Camera: {cam:<54} ║")
-    print(f"  ║  Fired At:        {fired_at:<54} ║")
-    print("  ║                                                                          ║")
-    print("  ║  ℹ️  Note: This is an automated text message notification, not a call.    ║")
-    print("  ║                                                                          ║")
+    if snap_path and os.path.exists(snap_path):
+        photo_label = f"📷 [most recent Ring camera image: {snap_path} ({snap_size_kb:.1f} KB JPEG)]"
+        print(f"  ║  {photo_label:<72} ║")
+        print("  ║" + " " * 74 + "║")
+    for line in plain_text.strip().split("\n"):
+        print(f"  ║  {line:<72} ║")
+    print("  ║" + " " * 74 + "║")
     print("  ║  ┌────────────────────────────────┐    ┌───────────────────────────────┐ ║")
     print("  ║  │       [ False alarm ]          │    │          [ Got it ]           │ ║")
     print("  ║  └────────────────────────────────┘    └───────────────────────────────┘ ║")
     print("  ╚" + "═" * 74 + "╝")
-    print()
-
-
-def print_pitch_summary() -> None:
-    """Print hackathon closing pitch summary and differentiator scorecard."""
-    print()
-    print("=" * 86)
-    print("  THRESHOLD HACKATHON VALUE PROPOSITION & ARCHITECTURAL SCORECARD")
-    print("=" * 86)
-    print("  1. ZERO CLOUD / ZERO AWS: Elderly care data never leaves the home network.")
-    print("     Runs entirely on local edge hardware (Mac / Linux / Raspberry Pi).")
-    print("  2. ZERO PIP DEPENDENCIES: 100% Python standard library (http.server + sqlite3).")
-    print("     Zero virtualenvs to configure, zero supply chain vulnerabilities, zero cost.")
-    print("  3. DETERMINISTIC ENGINE: Strict edge-transition absence detection.")
-    print("     No hallucinating LLMs in the safety loop. Single-fire escalations, zero spam.")
-    print("  4. SNAPSHOT-ENRICHED ALERTS: Live Ring camera photo attached right inside Telegram.")
-    print("     Caregiver visually confirms resident wellness in seconds before panicking.")
-    print("  5. VERIFIED LIVE: Tested against real Ring Partner API (discovery, status, events,")
-    print("     and 106 KB JPEG camera snapshots) with 169 automated tests passing.")
-    print("=" * 86)
-    print("  'Because the most critical signal of the day is the one that's missing.'")
-    print("=" * 86)
     print()
 
 
@@ -293,7 +276,7 @@ def sync_device_poll(conn: sqlite3.Connection, now_iso: str) -> None:
     devices = [
         "sensor_front_door",
         "sensor_medicine_cabinet",
-        "cam_kitchen_indoor",
+        "Playground Device",
         "cam_front_porch",
     ]
     for dev in devices:
@@ -375,7 +358,7 @@ def run_demo(
         timezone_name="America/Chicago",
         days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
         escalation_delay_minutes=30,
-        snapshot_device_id="cam_kitchen_indoor",
+        snapshot_device_id="Playground Device",
     )
     save_routine(
         conn=conn,
@@ -488,7 +471,7 @@ def run_demo(
 
     print_timeline_row("12:30 UTC", "07:30 CDT", st_med_1, st_door_1, "0 active", "Front door motion detected (Margaret got paper)")
     print("     ↳ Front Door Walk satisfied -> 🟢 OBSERVED. Medicine cabinet window is open -> 🟡 WATCHING.")
-    print("     ↳ Dashboard shows 100% Wellness, 1 routine satisfied, 1 routine watching.")
+    print("     ↳ Dashboard shows 100% routines observed today, 1 routine satisfied, 1 routine watching.")
 
     pace_pause(1.5)
     prompt_step("Beat 1 complete. Margaret has completed her front door walk.")
@@ -531,8 +514,8 @@ def run_demo(
     c_beat2.close()
 
     print_timeline_row("14:31 UTC", "09:31 CDT", st_med_2, st_door_2, f"{esc_count} fired", "⚠️ DEADLINE PASSED: Edge-transition into MISSED!")
-    print("     ↳ Deterministic edge-trigger fires strictly once! Alert dispatched with kitchen snapshot.")
-    print("     ↳ Web Dashboard displays pulsing URGENT CARE ALERT banner at top.")
+    print("     ↳ Deterministic edge-trigger fires strictly once! Alert dispatched with camera snapshot.")
+    print("     ↳ Web Dashboard displays pulsing MISSED ROUTINE banner at top.")
 
     # Render smartphone notification card
     if demo_notifier.sent_escalations:
@@ -559,7 +542,7 @@ def run_demo(
         beat_num=3,
         title="Caretaker Resolution & Late Activity",
         local_time="09:35 -> 10:00 CDT (14:35 -> 15:00 UTC)",
-        subtitle="Sarah views the kitchen snapshot, confirms Mom is resting, and taps [False alarm].",
+        subtitle="Sarah views the camera snapshot, confirms Mom is resting, and taps [False alarm].",
     )
 
     # 1. Caregiver taps False alarm at 09:35 CDT (14:35 UTC)
@@ -617,11 +600,6 @@ def run_demo(
     print("     ↳ Status updates cleanly to 🟢 OBSERVED. Full audit log of escalation and correction preserved.")
 
     pace_pause(1.2)
-
-    # -------------------------------------------------------------
-    # WRAP-UP & METRICS
-    # -------------------------------------------------------------
-    print_pitch_summary()
 
     # Compile final execution results
     result_data = {

@@ -279,7 +279,7 @@ def get_dashboard_data(
             esc["snapshot_url"] = None
 
     total_routines = len(routines_data)
-    wellness_pct = int((observed_count / total_routines * 100)) if total_routines > 0 else 100
+    observed_pct = int((observed_count / total_routines * 100)) if total_routines > 0 else 100
 
     return {
         "household": household_name,
@@ -302,7 +302,7 @@ def get_dashboard_data(
             "missed_count": missed_count,
             "snoozed_count": snoozed_count,
             "unknown_count": unknown_count,
-            "wellness_pct": wellness_pct,
+            "observed_pct": observed_pct,
             "online_devices": online_devices_count,
             "total_devices": len(devices),
         },
@@ -325,7 +325,7 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
     summary = data.get("summary", {})
     daemon = data.get("daemon", {})
 
-    wellness_color = "#6db88f" if summary.get("wellness_pct", 100) >= 80 else ("#d4a04a" if summary.get("wellness_pct", 100) >= 50 else "#d4695a")
+    observed_color = "#6db88f" if summary.get("observed_pct", 100) >= 80 else ("#d4a04a" if summary.get("observed_pct", 100) >= 50 else "#d4695a")
 
     # Emergency Alert Banner if any routine is missed
     emergency_banner_html = ""
@@ -336,7 +336,7 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
           <div class="container emergency-content">
             <span class="emergency-icon">🚨</span>
             <div class="emergency-text">
-              <strong>URGENT CARE ALERT:</strong> {missed_count} routine(s) missed expected activity window! Telegram notification dispatched to caregivers.
+              <strong>MISSED ROUTINE:</strong> {missed_count} routine(s) missed expected activity window! Telegram notification dispatched to caregivers.
             </div>
           </div>
         </div>
@@ -997,8 +997,8 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
     <!-- KPI Summary Grid -->
     <div class="metrics-grid">
       <div class="metric-card">
-        <div class="metric-label">Daily Wellness</div>
-        <div class="metric-value" style="color: {wellness_color};">{summary.get('wellness_pct', 100)}%</div>
+        <div class="metric-label">Routines observed today</div>
+        <div class="metric-value" style="color: {observed_color};">{summary.get('observed_pct', 100)}%</div>
         <div class="metric-sub">{summary.get('observed_count', 0)} of {summary.get('total_routines', 0)} completed</div>
       </div>
       <div class="metric-card">
@@ -1122,6 +1122,9 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
       </div>
       <div class="footer-pill">
         🔒 100% Local Edge Server • Zero AWS • Python Stdlib Only • <a href="/api/status" target="_blank">JSON API</a>
+      </div>
+      <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 6px;">
+        Caregiver-support notification tool. Not an emergency or medical device. Does not contact emergency services.
       </div>
     </footer>
 

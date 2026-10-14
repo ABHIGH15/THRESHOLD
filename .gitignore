@@ -13,9 +13,15 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Local files and state
+threshold.json
+
 # SQLite
 *.db
+*.db-wal
+*.db-shm
 *.db-journal
+demo_threshold.db
 
 # Evidence (real API responses — git-ignored; only redacted samples under docs/ring_samples/ are committed)
 evidence/

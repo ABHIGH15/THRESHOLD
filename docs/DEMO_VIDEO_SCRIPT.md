@@ -21,7 +21,7 @@
 │                                      │                                 │
 │  - Routine cards (green/yellow/red)  │  - Interactive 3-beat runner    │
 │  - Emergency pulsing top banner      │  - Step-by-step timeline table  │
-│  - Live Ring hardware status         │  - Clean formatted ASCII boxes  │
+│  - Ring Partner API sandbox status   │  - Clean formatted ASCII boxes  │
 │  - Today's activity & audit log      │                                 │
 │                                      ├─────────────────────────────────┤
 │                                      │   LOWER RIGHT (1:15–1:40 PIP)   │
@@ -50,8 +50,8 @@
 | Timestamp | Visual Cue | On-Screen Action | Audio Narration (Verbatim) |
 | :--- | :--- | :--- | :--- |
 | **0:32 – 0:45** | Focus on Medicine Cabinet card: **🟡 WATCHING** (Window: 07:00–09:00). | Terminal clock advances past 09:00. Status remains Watching due to the 30-minute grace buffer. | *"Every morning between 7:00 and 9:00, Margaret opens her medicine cabinet. But today... the clock strikes 9:00. The window closes. Threshold doesn't panic — it waits for a thirty-minute grace buffer."* |
-| **0:45 – 0:58** | Clock reaches 09:31 CDT. The room remains silent. | Edge transition occurs! Medicine Cabinet card turns **🔴 MISSED**. High-contrast **URGENT CARE ALERT** banner pulses at top of dashboard. | *"At 9:31, the grace buffer expires. Silence. Ring tells you when a door opens. Nobody tells you when it didn't. Threshold's deterministic engine detects the absence and edge-triggers an immediate escalation."* |
-| **0:58 – 1:15** | Phone Screen PIP appears over lower right terminal. | Phone vibrates. Real Telegram notification pops up with high-res kitchen camera photo and buttons: `[False alarm]` `[Got it]`. | *"The caregiver doesn't get a cold, jarring phone call. Her daughter Sarah gets a quiet photo notification right inside Telegram — a live snapshot from the kitchen camera. In one glance, Sarah can see if Mom is in bed, sitting in her armchair, or in need of help."* |
+| **0:45 – 0:58** | Clock reaches 09:31 CDT. The room remains silent. | Edge transition occurs! Medicine Cabinet card turns **🔴 MISSED**. High-contrast **MISSED ROUTINE** banner pulses at top of dashboard. | *"At 9:31, the grace buffer expires. Silence. Ring tells you when a door opens. Nobody tells you when it didn't. Threshold's deterministic engine detects the absence and edge-triggers an immediate escalation."* |
+| **0:58 – 1:15** | Phone Screen PIP appears over lower right terminal. | Phone vibrates. Real Telegram notification pops up with high-res camera photo and buttons: `[False alarm]` `[Got it]`. | *"The caregiver doesn't get a cold, jarring phone call. Her daughter Sarah gets a quiet photo notification right inside Telegram — the most recent camera image from the sandbox camera. In one glance, Sarah can see if Mom is in bed, sitting in her armchair, or in need of help."* |
 
 ---
 
@@ -68,7 +68,7 @@
 
 | Timestamp | Visual Cue | On-Screen Action | Audio Narration (Verbatim) |
 | :--- | :--- | :--- | :--- |
-| **1:42 – 1:52** | Terminal runs `python3 -m unittest discover tests -v`. Green output scrolls: **174 tests passing**. | Architecture slide / scorecard: Zero AWS, Zero Pip dependencies, 100% Local privacy. | *"Zero cloud. Zero AWS bills. Zero third-party dependencies — built entirely on Python's standard library and SQLite. Runs on a twenty-dollar Raspberry Pi. One hundred and seventy-four automated tests."* |
+| **1:42 – 1:52** | Terminal runs `python3 -m unittest discover tests -v`. Green output scrolls: **automated tests passing**. | Architecture slide / scorecard: Zero AWS, Zero Pip dependencies. Runs on your own machine; no Threshold-operated cloud. Data goes only to Ring (the source) and Telegram (alerts). | *"Zero cloud. Zero AWS bills. Zero third-party dependencies — built entirely on Python's standard library and SQLite. Runs on a twenty-dollar Raspberry Pi. Comprehensive automated test suite."* |
 | **1:52 – 1:58** | Closing Title Card: THRESHOLD + GitHub URL. | Subtitle: *"Because the most critical signal of the day is the one that's missing."* | *"Threshold — because the most important signal of the day is the silence. Thank you."* |
 
 ---
@@ -77,11 +77,11 @@
 
 If pitching live at a hackathon booth, deliver this exact 45-second pitch:
 
-> *"Ring tells you when something happens — the door opened, motion detected. But nobody tells you when something **didn't** happen. If your 82-year-old grandmother opens her medicine cabinet every morning at 7:30, and one morning she doesn't — that silence is the most critical signal of her day.*
+> *"Ring tells you when something happens — the door opened, motion detected. But nobody tells you when something **didn't** happen. If your 82-year-old grandmother opens her medicine cabinet every morning at 7:30, and one morning she doesn't — that silence is the most critical signal of her day.
 > 
-> *Threshold monitors daily routines using existing Ring sensors already in the home. When expected activity doesn't occur, it edge-triggers an escalation and sends the caregiver a snapshot photo from the nearest Ring camera right inside Telegram with two simple buttons: 'False alarm' or 'Got it.'*
+> *Threshold monitors daily routines using existing Ring sensors already in the home. When expected activity doesn't occur, it edge-triggers an escalation and sends the caregiver a snapshot photo from the nearest Ring camera right inside Telegram with two simple buttons: 'False alarm' or 'Got it.'
 > 
-> *It runs on a Raspberry Pi on the local home network. Zero AWS, zero cloud subscriptions, zero pip dependencies, and 100% privacy — her care data never leaves her home. We've verified it live against real Ring hardware, captured real camera snapshots, and backed it with 174 passing automated tests.*
+> *It runs on a Raspberry Pi on the local home network. Zero AWS, zero cloud subscriptions, zero pip dependencies. Runs on your own machine; no Threshold-operated cloud. Data goes only to Ring (the source) and Telegram (alerts). We've verified it live against Ring Partner API sandbox (Developer Playground), captured camera snapshots, and backed it with passing automated tests.
 > 
 > *The sensors were already there. The cameras were already recording. All that was missing was someone listening for the silence."*
 
@@ -90,13 +90,13 @@ If pitching live at a hackathon booth, deliver this exact 45-second pitch:
 ## 4. Judge Q&A Defense & Objection Cheat Sheet
 
 ### Q1: "Why did you build this with Zero AWS / Zero Cloud?"
-- **Answer:** *"Elderly care data is deeply intimate: sleep schedules, bathroom visits, medication timing. Families do not want their parent's daily behavioral rhythms uploaded to third-party cloud data lakes or LLM providers. By running locally on an edge device (Mac, Linux mini PC, or Raspberry Pi) with SQLite, the data remains 100% private inside the home network, and families never pay monthly cloud hosting bills."*
+- **Answer:** *"Elderly care data is deeply intimate: sleep schedules, bathroom visits, medication timing. Families do not want their parent's daily behavioral rhythms uploaded to third-party cloud data lakes or LLM providers. Runs on your own machine; no Threshold-operated cloud. Data goes only to Ring (the source) and Telegram (alerts). Families never pay monthly cloud hosting bills."*
 
 ### Q2: "Why standard library only (zero pip dependencies)?"
-- **Answer:** *"A non-technical family member or volunteer setting up an edge device for Grandma cannot debug pip virtualenvs, broken C-extensions, or broken wheels on ARM processors. Threshold runs directly on any machine with Python 3.10+ installed. It eliminates supply chain security vulnerabilities and guarantees longevity."*
+- **Answer:** *"A non-technical family member or volunteer setting up an edge device for Grandma cannot debug pip virtualenvs, broken C-extensions, or broken wheels on ARM processors. Threshold runs directly on any machine with Python 3.10+ installed. It simplifies deployment and maintenance."*
 
 ### Q3: "Why a deterministic rule engine instead of Machine Learning or LLMs?"
-- **Answer:** *"In life safety and elderly care, determinism and explainability are paramount. If an alert fires, a caregiver needs to know exactly why: 'The window was 7:00 to 9:00, the 30-minute grace buffer expired, and no cabinet event was received.' If a model hallucinates a 68% anomaly probability, nobody knows what that means. Deterministic edge detection guarantees zero alert spam and exactly one notification per missed routine."*
+- **Answer:** *"In life safety and elderly care, determinism and explainability are paramount. If an alert fires, a caregiver needs to know exactly why: 'The window was 7:00 to 9:00, the 30-minute grace buffer expired, and no cabinet event was received.' If a model hallucinates a 68% anomaly probability, nobody knows what that means. Deterministic edge detection provides one alert per missed routine per day."*
 
 ### Q4: "What happens if the home internet or Ring camera goes offline?"
 - **Answer:** *"Threshold implements a strict three-state absence model: if Ring device health stops reporting or becomes stale (> 2 hours old), the routine transitions to `UNKNOWN`, NOT `MISSED`. Threshold will NEVER sound a false alarm because Grandma's Wi-Fi router rebooted. When connectivity restores, Threshold backfills event history and catches up automatically."*

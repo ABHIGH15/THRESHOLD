@@ -304,14 +304,14 @@ class TestDashboardSystem(unittest.TestCase):
         normal_data = get_dashboard_data(self.conn, snapshot_dir=self.snapshot_dir)
         normal_html = render_dashboard_html(normal_data)
         self.assertNotIn('<div class="emergency-alert-banner">', normal_html)
-        self.assertNotIn("URGENT CARE ALERT", normal_html)
+        self.assertNotIn("MISSED ROUTINE", normal_html)
 
         # 2. Missed state
         miss_data = dict(normal_data)
         miss_data["summary"] = dict(normal_data["summary"], missed_count=2)
         miss_html = render_dashboard_html(miss_data)
         self.assertIn('<div class="emergency-alert-banner">', miss_html)
-        self.assertIn("URGENT CARE ALERT:", miss_html)
+        self.assertIn("MISSED ROUTINE:", miss_html)
         self.assertIn("2 routine(s) missed expected activity window", miss_html)
 
     def test_html_modal_dialog_markup(self):

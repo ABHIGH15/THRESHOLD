@@ -78,6 +78,86 @@ def format_last_activity(routine: Routine, device_health: Optional[Any] = None) 
     return "None recorded within window"
 
 
+def format_escalation_text(
+    routine: Routine,
+    fired_at: str,
+    device_health: Optional[Any] = None,
+) -> str:
+    """Format Telegram alert message text for an escalation."""
+    expected_by = format_expected_by(routine)
+    health_state = format_health_state(routine, device_health)
+    last_act = format_last_activity(routine, device_health)
+
+    return (
+        f"🚨 <b>THRESHOLD ESCALATION</b>\n\n"
+        f"Routine: <b>{routine.name}</b>\n"
+        f"Expected by: {expected_by}\n"
+        f"Device State: {health_state}\n"
+        f"Last Activity: {last_act}\n"
+        f"Fired at: {fired_at}\n\n"
+        f"<i>Please note: this is an automated message notification, not a phone call.</i>"
+    )
+
+
+def resolve_callback_routine_id(
+    conn: sqlite3.Connection,
+    candidate_id: Optional[str],
+    local_date: Optional[str],
+) -> Optional[str]:
+    """
+    Resolve callback routine_id, handling direct match, SHA256 prefix hash, or fallback.
+    """
+    if not candidate_id:
+        if local_date:
+            cur = conn.execute(
+                "SELECT routine_id FROM escalations WHERE local_date = ? AND acked_at IS NULL ORDER BY fired_at DESC LIMIT 1",
+                (local_date,),
+            )
+            row = cur.fetchone()
+            if row:
+                return row["routine_id"]
+        cur = conn.execute(
+            "SELECT routine_id FROM escalations WHERE acked_at IS NULL ORDER BY fired_at DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+        return row["routine_id"] if row else None
+
+    # 1. Direct match in routines table
+    if get_routine(conn, candidate_id) is not None:
+        return candidate_id
+
+    # 2. Check if candidate_id is a 16-character sha256 hash prefix of any routine
+    if len(candidate_id) == 16:
+        cur = conn.execute("SELECT routine_id FROM routines")
+        for row in cur.fetchall():
+            real_id = row["routine_id"]
+            if hashlib.sha256(real_id.encode("utf-8")).hexdigest()[:16] == candidate_id:
+                return real_id
+
+        # Also check escalations in case routine was modified or deleted
+        cur = conn.execute("SELECT DISTINCT routine_id FROM escalations")
+        for row in cur.fetchall():
+            real_id = row["routine_id"]
+            if hashlib.sha256(real_id.encode("utf-8")).hexdigest()[:16] == candidate_id:
+                return real_id
+
+    # 3. Fallback to unacknowledged escalation for local_date or overall
+    if local_date:
+        cur = conn.execute(
+            "SELECT routine_id FROM escalations WHERE local_date = ? AND acked_at IS NULL ORDER BY fired_at DESC LIMIT 1",
+            (local_date,),
+        )
+        row = cur.fetchone()
+        if row:
+            return row["routine_id"]
+
+    cur = conn.execute(
+        "SELECT routine_id FROM escalations WHERE acked_at IS NULL ORDER BY fired_at DESC LIMIT 1"
+    )
+    row = cur.fetchone()
+    return row["routine_id"] if row else None
+
+
 def make_callback_data(prefix: str, routine_id: str, local_date: str) -> str:
     """
     Construct inline keyboard callback_data staying strictly at or under 64 bytes.
@@ -492,19 +572,7 @@ class TelegramNotifier(Notifier):
         - Falls back gracefully to sendMessage (zero alert drops).
         Returns delivery metadata dictionary.
         """
-        expected_by = format_expected_by(routine)
-        health_state = format_health_state(routine, device_health)
-        last_act = format_last_activity(routine, device_health)
-
-        text = (
-            f"🚨 <b>THRESHOLD ESCALATION</b>\n\n"
-            f"Routine: <b>{routine.name}</b>\n"
-            f"Expected by: {expected_by}\n"
-            f"Device State: {health_state}\n"
-            f"Last Activity: {last_act}\n"
-            f"Fired at: {fired_at}\n\n"
-            f"<i>Please note: this is an automated message notification, not a phone call.</i>"
-        )
+        text = format_escalation_text(routine, fired_at, device_health)
 
         fa_data = make_callback_data("fa", routine.routine_id, local_date)
         ak_data = make_callback_data("ak", routine.routine_id, local_date)
@@ -684,7 +752,7 @@ class TelegramNotifier(Notifier):
     def get_updates(self, offset: Optional[int] = None, timeout: int = 0) -> List[Dict[str, Any]]:
         """
         Poll updates from Telegram with offset tracking.
-        Default timeout=0 guarantees non-blocking short poll.
+        Default timeout=0 ensures non-blocking short poll.
         """
         req_offset = self.last_offset if offset is None else offset
         payload = {
@@ -767,19 +835,22 @@ class TelegramNotifier(Notifier):
             is_ak = cb_data.startswith("ak:") or cb_data.startswith("ack:") or cb_data == "Got it"
 
             if is_fa:
-                routine_id, local_date = None, None
+                cand_routine_id, local_date = None, None
                 if ":" in cb_data:
                     parts = cb_data.split(":", 2)
                     if len(parts) >= 3:
-                        routine_id, local_date = parts[1], parts[2]
-                if not routine_id:
-                    # Fallback to most recent unacknowledged escalation
+                        cand_routine_id, local_date = parts[1], parts[2]
+                routine_id = resolve_callback_routine_id(conn, cand_routine_id, local_date)
+                if not local_date and routine_id:
                     cur = conn.execute(
-                        "SELECT routine_id, local_date FROM escalations WHERE acked_at IS NULL ORDER BY fired_at DESC LIMIT 1"
+                        "SELECT local_date FROM escalations WHERE routine_id = ? AND acked_at IS NULL ORDER BY fired_at DESC LIMIT 1",
+                        (routine_id,),
                     )
                     row = cur.fetchone()
                     if row:
-                        routine_id, local_date = row["routine_id"], row["local_date"]
+                        local_date = row["local_date"]
+                if not local_date:
+                    local_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
                 if routine_id and local_date:
                     r_row = get_routine(conn, routine_id)
@@ -811,18 +882,22 @@ class TelegramNotifier(Notifier):
 
             # Route 2: Got it / ack -> ack escalation
             elif is_ak:
-                routine_id, local_date = None, None
+                cand_routine_id, local_date = None, None
                 if ":" in cb_data:
                     parts = cb_data.split(":", 2)
                     if len(parts) >= 3:
-                        routine_id, local_date = parts[1], parts[2]
-                if not routine_id:
+                        cand_routine_id, local_date = parts[1], parts[2]
+                routine_id = resolve_callback_routine_id(conn, cand_routine_id, local_date)
+                if not local_date and routine_id:
                     cur = conn.execute(
-                        "SELECT routine_id, local_date FROM escalations WHERE acked_at IS NULL ORDER BY fired_at DESC LIMIT 1"
+                        "SELECT local_date FROM escalations WHERE routine_id = ? AND acked_at IS NULL ORDER BY fired_at DESC LIMIT 1",
+                        (routine_id,),
                     )
                     row = cur.fetchone()
                     if row:
-                        routine_id, local_date = row["routine_id"], row["local_date"]
+                        local_date = row["local_date"]
+                if not local_date:
+                    local_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
                 if routine_id and local_date:
                     ack_escalation(conn, routine_id, local_date, now_iso)
