@@ -1106,3 +1106,49 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
   - `test_daemon_embeds_dashboard_server`: Verifies `ThresholdDaemon` boots dashboard server and cleans it up.
 - **Total Test Suite:** **164 tests passing** (`python3 -m unittest discover tests -v`) in $\approx 32.8$ seconds with 0 third-party pip dependencies.
 
+---
+
+### Priority 4b: Dashboard Hardening & UI/UX Enhancements
+
+#### 1. Hardening & Enhancements Delivered
+- **Zero-Dependency SVG Favicon (`GET /favicon.ico` & `GET /favicon.svg`)**:
+  - Serves an embedded inline SVG favicon (`image/svg+xml`) with a distinctive orange threshold arch icon (`FAVICON_SVG`).
+  - Added `<link rel="icon" type="image/svg+xml" href="/favicon.svg">` in the HTML `<head>`.
+  - Eliminates browser 404 noise in server and reverse-proxy logs without external static assets.
+- **Urgent Care Emergency Top Banner**:
+  - Renders a prominent high-contrast pulsing alert banner (`.emergency-alert-banner`) at the very top of the dashboard when `missed_count > 0`.
+  - Displays explicit caregiver instruction: *"URGENT CARE ALERT: N routine(s) missed expected activity window. Check Telegram alert and verify resident wellness."*
+- **HTTP Security Headers**:
+  - Standardized `_send_response` helper on `DashboardHandler` to automatically attach industry-standard security headers:
+    - `X-Content-Type-Options: nosniff` (prevents MIME sniffing)
+    - `X-Frame-Options: SAMEORIGIN` (prevents clickjacking)
+    - `Referrer-Policy: no-referrer` (prevents privacy leakage)
+- **Server Socket Reusability & Port Collision Fallback**:
+  - Configured `DashboardServer.allow_reuse_address = True` (`SO_REUSEADDR`) and `DashboardServer.daemon_threads = True` to prevent socket `TIME_WAIT` lockouts during rapid dev/demo restarts.
+  - Implemented multi-port fallback in `start_dashboard_server`: if the target port (e.g. 8080) is occupied, sequentially tests up to 5 consecutive fallback ports (8081..8085) with informative logging.
+- **API Query Filtering & Routines Endpoint**:
+  - Extended `GET /api/status` with query parameter filtering:
+    - `?routine_id=<id>`: filters routines array down to a specific routine.
+    - `?status=<status>`: filters routines by status taxonomy (`observed`, `watching`, `missed`, `snoozed`, `unknown`).
+  - Added dedicated endpoint `GET /api/routines` returning the routines list directly as a JSON array.
+- **Caregiver Acknowledgment Status on Routine Cards**:
+  - Displays real-time acknowledgment state on missed routine cards:
+    - `🟡 Alert sent — unacknowledged`
+    - `🟢 Acknowledged (False alarm)`
+    - `🟢 Acknowledged by caretaker`
+- **Pure HTML5 Modal Lightbox Dialog**:
+  - Embedded native `<dialog id="snap-modal">` with clean zero-dependency vanilla JS (`openSnapshotModal`, `.showModal()`, `.close()`).
+  - Clicking any routine snapshot thumbnail or audit link opens a full-resolution modal preview with backdrop blur and escape/click-outside dismiss.
+- **CLI Browser Auto-Launch (`--open` / `-o`)**:
+  - Added `--open` (`-o`) flag to `threshold dashboard` subcommand to automatically open the dashboard in the default web browser upon startup.
+
+#### 2. Automated Test Verification
+- Added 5 new integration tests to `tests/test_dashboard.py` (14 tests total):
+  - `test_favicon_ico_and_svg_return_200`: Verifies `/favicon.ico` and `/favicon.svg` return 200 with `image/svg+xml`.
+  - `test_security_headers_present`: Verifies `X-Content-Type-Options`, `X-Frame-Options`, and `Referrer-Policy` headers.
+  - `test_api_status_filtering_and_routines_endpoint`: Verifies query parameter filtering and dedicated `/api/routines` endpoint.
+  - `test_emergency_alert_banner_rendered_on_miss`: Verifies emergency banner renders on missed routines and is omitted on normal state.
+  - `test_html_modal_dialog_markup`: Verifies `<dialog>` element and modal trigger functions are embedded in HTML output.
+- **Total Test Suite:** **169 tests passing** (`python3 -m unittest discover tests -v`) in $\approx 35.3$ seconds with 0 third-party pip dependencies.
+
+

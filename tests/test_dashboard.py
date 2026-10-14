@@ -256,6 +256,71 @@ class TestDashboardSystem(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIsNone(daemon.dashboard_server)
 
+    def test_favicon_ico_and_svg_return_200(self):
+        """GET /favicon.ico and GET /favicon.svg return 200 OK with SVG image content."""
+        for path in ("/favicon.ico", "/favicon.svg"):
+            req = urllib.request.Request(f"{self.base_url}{path}")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertIn("image/svg+xml", resp.headers.get("Content-Type", ""))
+                body = resp.read()
+                self.assertTrue(body.startswith(b"<svg"))
+
+    def test_security_headers_present(self):
+        """Responses include essential security headers (nosniff, SAMEORIGIN, no-referrer)."""
+        req = urllib.request.Request(f"{self.base_url}/")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            headers = dict(resp.headers)
+            self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff")
+            self.assertEqual(headers.get("X-Frame-Options"), "SAMEORIGIN")
+            self.assertEqual(headers.get("Referrer-Policy"), "no-referrer")
+
+    def test_api_status_filtering_and_routines_endpoint(self):
+        """GET /api/status supports ?status= and ?routine_id= filtering, and /api/routines returns array."""
+        # 1. Filter by routine_id
+        req1 = urllib.request.Request(f"{self.base_url}/api/status?routine_id=rt_med")
+        with urllib.request.urlopen(req1, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            self.assertEqual(len(data["routines"]), 1)
+            self.assertEqual(data["routines"][0]["routine_id"], "rt_med")
+
+        # 2. Filter by nonexistent routine_id
+        req2 = urllib.request.Request(f"{self.base_url}/api/status?routine_id=nonexistent")
+        with urllib.request.urlopen(req2, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            self.assertEqual(len(data["routines"]), 0)
+
+        # 3. GET /api/routines returns array directly
+        req3 = urllib.request.Request(f"{self.base_url}/api/routines")
+        with urllib.request.urlopen(req3, timeout=5) as resp:
+            routines = json.loads(resp.read().decode("utf-8"))
+            self.assertIsInstance(routines, list)
+            self.assertEqual(len(routines), 1)
+            self.assertEqual(routines[0]["routine_id"], "rt_med")
+
+    def test_emergency_alert_banner_rendered_on_miss(self):
+        """Emergency alert banner is rendered if missed_count > 0, and omitted when 0."""
+        # 1. Normal state (0 missed)
+        normal_data = get_dashboard_data(self.conn, snapshot_dir=self.snapshot_dir)
+        normal_html = render_dashboard_html(normal_data)
+        self.assertNotIn('<div class="emergency-alert-banner">', normal_html)
+        self.assertNotIn("URGENT CARE ALERT", normal_html)
+
+        # 2. Missed state
+        miss_data = dict(normal_data)
+        miss_data["summary"] = dict(normal_data["summary"], missed_count=2)
+        miss_html = render_dashboard_html(miss_data)
+        self.assertIn('<div class="emergency-alert-banner">', miss_html)
+        self.assertIn("URGENT CARE ALERT:", miss_html)
+        self.assertIn("2 routine(s) missed expected activity window", miss_html)
+
+    def test_html_modal_dialog_markup(self):
+        """HTML output contains pure HTML5 modal dialog for full-res snapshot preview."""
+        data = get_dashboard_data(self.conn, snapshot_dir=self.snapshot_dir)
+        html_out = render_dashboard_html(data)
+        self.assertIn('<dialog id="snap-modal"', html_out)
+        self.assertIn("openSnapshotModal", html_out)
+
 
 if __name__ == "__main__":
     unittest.main()

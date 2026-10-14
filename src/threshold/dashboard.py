@@ -5,10 +5,11 @@ Provides a local, zero-cloud web command center for caretakers and family member
 1. Pure Python standard library only (http.server.ThreadingHTTPServer). Zero third-party dependencies.
 2. Server-side rendered HTML/CSS status page with auto-refresh (<meta http-equiv="refresh" content="10">).
 3. Routine status cards with live visual badges (🟢 OBSERVED, 🟡 WATCHING, 🔴 MISSED, ⚪ SNOOZED, ⚠️ UNKNOWN).
-4. Direct snapshot thumbnail previews from archived JPEG captures (/snapshots/<filename>).
-5. Device health metrics, today's event timeline, and escalation audit log.
-6. Read-only JSON endpoint (GET /api/status) for programmatic polling.
-7. Path-traversal protected static file serving for local camera snapshots.
+4. Direct snapshot thumbnail previews from archived JPEG captures (/snapshots/<filename>) + fullscreen modal lightbox.
+5. Device health metrics, today's event timeline, and escalation audit log with caretaker feedback tracking.
+6. Read-only JSON endpoint (GET /api/status, GET /api/routines) with query filtering (?status=, ?routine_id=).
+7. Path-traversal protected static file serving for local camera snapshots with security headers.
+8. Inline SVG favicon (/favicon.ico, /favicon.svg) and address-reuse socket handling.
 """
 
 from datetime import datetime, timezone
@@ -38,6 +39,7 @@ from src.threshold.status import (
 from src.threshold.store import (
     get_app_state,
     get_connection,
+    get_escalation,
     list_corrections,
     list_device_health,
     list_recent_escalations,
@@ -46,6 +48,13 @@ from src.threshold.store import (
 )
 
 logger = logging.getLogger(__name__)
+
+FAVICON_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#231f1b"/>
+  <path d="M18 48 L18 20 Q32 10 46 20 L46 48 Z" fill="none" stroke="#d4a04a" stroke-width="4" stroke-linejoin="round"/>
+  <line x1="12" y1="48" x2="52" y2="48" stroke="#d4695a" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="32" cy="32" r="5" fill="#6db88f"/>
+</svg>"""
 
 STATUS_CONFIG = {
     STATUS_OBSERVED: {
@@ -141,6 +150,7 @@ def get_dashboard_data(
     local_now = now.astimezone(tz)
     local_time_str = local_now.strftime("%I:%M %p %Z")
     local_date_str = local_now.strftime("%A, %b %d, %Y")
+    today_date_iso = local_now.strftime("%Y-%m-%d")
 
     # App state & daemon metrics
     daemon_started = get_app_state(conn, "daemon_started_at")
@@ -180,7 +190,7 @@ def get_dashboard_data(
         # Check for latest local snapshot
         latest_snap_rel = None
         latest_snap_file = f"{r_id}_latest.jpg"
-        dated_snap_file = f"{r_id}_{local_now.strftime('%Y-%m-%d')}.jpg"
+        dated_snap_file = f"{r_id}_{today_date_iso}.jpg"
         if os.path.exists(os.path.join(snapshot_dir, latest_snap_file)):
             latest_snap_rel = f"/snapshots/{latest_snap_file}"
         elif os.path.exists(os.path.join(snapshot_dir, dated_snap_file)):
@@ -197,6 +207,20 @@ def get_dashboard_data(
                 days_list = [d.strip() for d in days_val.split(",") if d.strip()]
         else:
             days_list = list(days_val)
+
+        # Caregiver acknowledgment status for missed routines
+        caretaker_ack = None
+        if status == STATUS_MISSED:
+            esc_row = get_escalation(conn, r_id, today_date_iso)
+            if esc_row:
+                if esc_row.get("acked_at"):
+                    caretaker_ack = "Acknowledged"
+                elif esc_row.get("reminded_at"):
+                    caretaker_ack = "Reminder Sent (Pending)"
+                elif esc_row.get("notified_at"):
+                    caretaker_ack = "Alert Sent (Pending)"
+                else:
+                    caretaker_ack = "Firing"
 
         routines_data.append({
             "routine_id": r_id,
@@ -218,6 +242,7 @@ def get_dashboard_data(
             "last_satisfied_friendly": last_sat_friendly,
             "snapshot_url": latest_snap_rel,
             "device_online": not health_rec.is_stale(now),
+            "caretaker_ack": caretaker_ack,
         })
 
     # Device health records
@@ -302,6 +327,21 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
 
     wellness_color = "#6db88f" if summary.get("wellness_pct", 100) >= 80 else ("#d4a04a" if summary.get("wellness_pct", 100) >= 50 else "#d4695a")
 
+    # Emergency Alert Banner if any routine is missed
+    emergency_banner_html = ""
+    missed_count = summary.get("missed_count", 0)
+    if missed_count > 0:
+        emergency_banner_html = f"""
+        <div class="emergency-alert-banner">
+          <div class="container emergency-content">
+            <span class="emergency-icon">🚨</span>
+            <div class="emergency-text">
+              <strong>URGENT CARE ALERT:</strong> {missed_count} routine(s) missed expected activity window! Telegram notification dispatched to caregivers.
+            </div>
+          </div>
+        </div>
+        """
+
     # Render routine cards
     cards_html = []
     for r in data.get("routines", []):
@@ -313,13 +353,23 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
         r_sat = html.escape(r.get("last_satisfied_friendly", "Never"))
         days_str = ", ".join(d.upper() for d in r.get("days", []))
 
+        ack_pill = ""
+        if r.get("caretaker_ack"):
+            ack_text = html.escape(r["caretaker_ack"])
+            ack_cls = "badge-green" if "Acknowledged" in ack_text else "badge-red"
+            ack_pill = f"""
+            <div class="card-detail ack-state">
+              <span>Caregiver Status:</span> <b class="{ack_cls}">{ack_text}</b>
+            </div>
+            """
+
         thumb_html = ""
         if r.get("snapshot_url"):
             thumb_html = f"""
             <div class="card-thumb-container">
-              <a href="{r['snapshot_url']}" target="_blank" title="View Full Snapshot">
+              <a href="{r['snapshot_url']}" onclick="openSnapshotModal('{r['snapshot_url']}', '{r_name}'); return false;" title="Click for Fullscreen Preview">
                 <img src="{r['snapshot_url']}" class="card-thumb" alt="Room Snapshot" />
-                <span class="thumb-badge">📷 Live Snapshot</span>
+                <span class="thumb-badge">📷 Click to Expand</span>
               </a>
             </div>
             """
@@ -347,6 +397,7 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
           <div class="card-detail last-sat">
             <span>Last Activity:</span> <b>{r_sat}</b>
           </div>
+          {ack_pill}
           {thumb_html}
         </div>
         """)
@@ -379,7 +430,7 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
         action = html.escape(esc.get("caretaker_action", "Pending"))
         snap_link = ""
         if esc.get("snapshot_url"):
-            snap_link = f"<a href='{esc['snapshot_url']}' target='_blank' class='btn-view-photo'>📷 Photo</a>"
+            snap_link = f"<a href='{esc['snapshot_url']}' onclick=\"openSnapshotModal('{esc['snapshot_url']}', '{r_id} Snapshot'); return false;\" class='btn-view-photo'>📷 Photo</a>"
         else:
             snap_link = "<span class='text-muted'>—</span>"
 
@@ -418,6 +469,8 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="refresh" content="10">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="alternate icon" href="/favicon.ico">
   <title>Threshold — {h_name}</title>
   <style>
     :root {{
@@ -458,6 +511,30 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
       margin: 0 auto;
       padding: 24px 20px;
     }}
+
+    /* Emergency Alert Banner */
+    .emergency-alert-banner {{
+      background: linear-gradient(90deg, #992b1d, #d4695a);
+      color: #ffffff;
+      padding: 12px 0;
+      box-shadow: 0 4px 16px rgba(212, 105, 90, 0.4);
+      border-bottom: 2px solid #5c1e16;
+      animation: alert-glow 3s infinite alternate;
+    }}
+    @keyframes alert-glow {{
+      0% {{ opacity: 0.95; }}
+      100% {{ opacity: 1; filter: brightness(1.1); }}
+    }}
+    .emergency-content {{
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 0.95rem;
+    }}
+    .emergency-icon {{
+      font-size: 1.4rem;
+    }}
+
     /* Top Header */
     header {{
       background: var(--surface);
@@ -655,6 +732,10 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
       border-top: 1px dashed var(--border);
       color: var(--text);
     }}
+    .card-detail.ack-state {{
+      padding-top: 4px;
+      color: var(--text);
+    }}
     .online-dot {{
       display: inline-block;
       width: 7px;
@@ -681,6 +762,7 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
       object-fit: cover;
       display: block;
       transition: opacity 0.2s;
+      cursor: zoom-in;
     }}
     .card-thumb:hover {{
       opacity: 0.9;
@@ -695,6 +777,59 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
       padding: 3px 8px;
       border-radius: 6px;
       backdrop-filter: blur(4px);
+    }}
+
+    /* Lightbox Modal Dialog */
+    .snap-modal {{
+      margin: auto;
+      border: none;
+      background: transparent;
+      padding: 0;
+      max-width: 90vw;
+      max-height: 90vh;
+      outline: none;
+    }}
+    .snap-modal::backdrop {{
+      background: rgba(0, 0, 0, 0.85);
+      backdrop-filter: blur(5px);
+    }}
+    .modal-box {{
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8);
+    }}
+    .modal-header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      font-weight: 700;
+      color: var(--text);
+    }}
+    .modal-close {{
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 1.2rem;
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 6px;
+    }}
+    .modal-close:hover {{
+      color: #fff;
+      background: rgba(255, 255, 255, 0.1);
+    }}
+    #snap-modal-img {{
+      max-width: 85vw;
+      max-height: 75vh;
+      object-fit: contain;
+      display: block;
+      background: #000;
     }}
 
     /* Split Sections (Activity & Escalations) */
@@ -820,8 +955,22 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
       font-size: 0.75rem;
     }}
   </style>
+  <script>
+    function openSnapshotModal(imgSrc, title) {{
+      var modal = document.getElementById('snap-modal');
+      var img = document.getElementById('snap-modal-img');
+      var caption = document.getElementById('snap-modal-title');
+      if (modal && img) {{
+        img.src = imgSrc;
+        if (caption) caption.innerText = title;
+        modal.showModal();
+      }}
+    }}
+  </script>
 </head>
 <body>
+
+  {emergency_banner_html}
 
   <header>
     <div class="container header-content">
@@ -978,6 +1127,17 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
 
   </div>
 
+  <!-- Snapshot Lightbox Modal -->
+  <dialog id="snap-modal" class="snap-modal" onclick="if(event.target===this)this.close()">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span id="snap-modal-title">Snapshot Preview</span>
+        <button type="button" class="modal-close" onclick="document.getElementById('snap-modal').close()">✕</button>
+      </div>
+      <img id="snap-modal-img" src="" alt="Full Snapshot" />
+    </div>
+  </dialog>
+
 </body>
 </html>
 """
@@ -991,18 +1151,26 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         pass
 
     def _send_response(self, status_code: int, content_type: str, body_bytes: bytes) -> None:
-        """Helper to send HTTP response headers and body."""
+        """Helper to send HTTP response headers and body with security headers."""
         self.send_response(status_code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body_bytes)))
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(body_bytes)
 
     def do_GET(self) -> None:
-        """Handle GET requests for dashboard, JSON API, snapshots, and healthz."""
+        """Handle GET requests for dashboard, JSON API, snapshots, favicon, and healthz."""
         parsed_url = urllib.parse.urlparse(self.path)
         path = parsed_url.path
+
+        # Favicon handling
+        if path in ("/favicon.ico", "/favicon.svg"):
+            self._send_response(200, "image/svg+xml", FAVICON_SVG)
+            return
 
         # Health check
         if path == "/healthz":
@@ -1067,9 +1235,27 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             self._send_response(500, "text/plain", f"Database error: {exc}".encode("utf-8"))
             return
 
-        # JSON API status endpoint
-        if path == "/api/status":
-            resp_bytes = json.dumps(data, indent=2).encode("utf-8")
+        # JSON API endpoints with query filtering support
+        if path in ("/api/status", "/api/routines"):
+            query_params = urllib.parse.parse_qs(parsed_url.query)
+            status_filter = query_params.get("status", [None])[0]
+            routine_filter = query_params.get("routine_id", [None])[0]
+
+            filtered_data = dict(data)
+            if status_filter:
+                filtered_data["routines"] = [
+                    r for r in filtered_data["routines"] if r.get("status") == status_filter.lower()
+                ]
+            if routine_filter:
+                filtered_data["routines"] = [
+                    r for r in filtered_data["routines"] if r.get("routine_id") == routine_filter
+                ]
+
+            if path == "/api/routines":
+                resp_bytes = json.dumps(filtered_data["routines"], indent=2).encode("utf-8")
+            else:
+                resp_bytes = json.dumps(filtered_data, indent=2).encode("utf-8")
+
             self._send_response(200, "application/json", resp_bytes)
             return
 
@@ -1085,6 +1271,9 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
 
 class DashboardServer(http.server.ThreadingHTTPServer):
     """Configured ThreadingHTTPServer holding dashboard configuration."""
+
+    allow_reuse_address = True
+    daemon_threads = True
 
     def __init__(
         self,
@@ -1109,19 +1298,35 @@ def start_dashboard_server(
     household_name: str = "Mom's House — Dallas",
     timezone_name: str = "America/Chicago",
     snapshot_dir: str = "snapshots",
+    fallback_ports: bool = True,
 ) -> DashboardServer:
     """
     Instantiate and start the dashboard HTTP server on a background daemon thread.
+    Includes port collision fallback protection (e.g. if port 8080 is bound, tries 8081..8085).
     Returns the running DashboardServer instance.
     """
-    server = DashboardServer(
-        server_address=(host, port),
-        RequestHandlerClass=DashboardHandler,
-        db_path=db_path,
-        household_name=household_name,
-        timezone_name=timezone_name,
-        snapshot_dir=snapshot_dir,
-    )
+    attempt_port = port
+    max_attempts = 5 if (fallback_ports and port != 0) else 1
+    server = None
+
+    for attempt in range(max_attempts):
+        try:
+            server = DashboardServer(
+                server_address=(host, attempt_port),
+                RequestHandlerClass=DashboardHandler,
+                db_path=db_path,
+                household_name=household_name,
+                timezone_name=timezone_name,
+                snapshot_dir=snapshot_dir,
+            )
+            break
+        except OSError as exc:
+            if attempt < max_attempts - 1 and port != 0:
+                logger.warning("Port %d in use, trying fallback port %d...", attempt_port, attempt_port + 1)
+                attempt_port += 1
+            else:
+                raise exc
+
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
@@ -1134,20 +1339,24 @@ def run_dashboard_command(
     household_name: str = "Mom's House — Dallas",
     timezone_name: str = "America/Chicago",
     snapshot_dir: str = "snapshots",
+    open_browser: bool = False,
 ) -> int:
     """
     CLI command entry point: starts dashboard HTTP server and blocks until SIGINT/SIGTERM.
+    Optionally launches default browser if open_browser=True.
     """
-    server = DashboardServer(
-        server_address=(host, port),
-        RequestHandlerClass=DashboardHandler,
+    server = start_dashboard_server(
         db_path=db_path,
+        port=port,
+        host=host,
         household_name=household_name,
         timezone_name=timezone_name,
         snapshot_dir=snapshot_dir,
+        fallback_ports=True,
     )
     actual_port = server.server_address[1]
     display_host = "localhost" if host in ("0.0.0.0", "127.0.0.1") else host
+    dash_url = f"http://{display_host}:{actual_port}"
 
     print("=" * 70)
     print("THRESHOLD LOCAL WEB DASHBOARD")
@@ -1156,13 +1365,22 @@ def run_dashboard_command(
     print(f"Timezone:   {timezone_name}")
     print(f"Database:   {db_path}")
     print(f"Snapshots:  {snapshot_dir}")
-    print(f"Dashboard:  http://{display_host}:{actual_port}")
-    print(f"JSON API:   http://{display_host}:{actual_port}/api/status")
+    print(f"Dashboard:  {dash_url}")
+    print(f"JSON API:   {dash_url}/api/status")
     print("-" * 70)
     print("Press Ctrl+C to stop the dashboard server.")
 
+    if open_browser:
+        try:
+            import webbrowser
+
+            threading.Timer(0.8, lambda: webbrowser.open(dash_url)).start()
+        except Exception:
+            pass
+
     try:
-        server.serve_forever()
+        while True:
+            time.sleep(1.0)
     except KeyboardInterrupt:
         print("\nStopping dashboard server...")
     finally:

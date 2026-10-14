@@ -397,6 +397,7 @@ def run_dashboard_cli(args: argparse.Namespace) -> int:
         household_name=household,
         timezone_name=tz_name,
         snapshot_dir=args.snapshot_dir,
+        open_browser=getattr(args, "open", False),
     )
 
 
@@ -453,6 +454,7 @@ def main() -> int:
     dash_parser.add_argument("--household", default=None, help="Household display name")
     dash_parser.add_argument("--timezone", default=None, help="Household timezone name")
     dash_parser.add_argument("--snapshot-dir", default="snapshots", help="Directory where snapshots are saved (default: snapshots)")
+    dash_parser.add_argument("--open", "-o", action="store_true", help="Automatically open dashboard in default browser")
 
     # run (daemon)
     run_parser = subparsers.add_parser(
