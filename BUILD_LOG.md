@@ -1057,3 +1057,52 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
   - `test_update_escalation_snapshot`: Verifies `snapshot_status` and `snapshot_path` columns updated in SQLite.
 - **Total Test Suite:** **155 tests passing** (`python3 -m unittest discover tests -v`) in $\approx 27.1$ seconds with 0 third-party pip dependencies.
 
+---
+
+### Priority 4: Live Local Web Dashboard (`localhost:8080`) & Programmatic JSON API
+
+#### 1. Components Delivered
+- **Standalone Dashboard Module (`src/threshold/dashboard.py`)**:
+  - Implements a zero-cloud local web command center using Python's standard library `http.server.ThreadingHTTPServer`.
+  - Zero external pip dependencies, zero CDNs, zero JavaScript frameworks.
+- **Server-Side Rendered HTML/CSS Dashboard**:
+  - Embedded warm dark theme (`#1a1714` background, `#231f1b` surface, `#2a2520` cards, `#6db88f` green, `#d4a04a` amber, `#d4695a` coral, `#5a8fd4` blue).
+  - Built-in 10-second automatic refresh via `<meta http-equiv="refresh" content="10">`.
+  - Header displays household name, live daemon pulse indicator, and local clock in the household's configured timezone.
+  - KPI Summary Grid: Daily Wellness %, Active Watching count, Missed / Urgent count, Connected Devices, and Daemon Heartbeat / tick count.
+  - Routine Status Cards Grid:
+    - Status badges: `🟢 OBSERVED`, `🟡 WATCHING`, `🔴 MISSED`, `⚪ SNOOZED`, `⚠️ UNKNOWN`.
+    - Routine window times with escalation buffer, active days, sensor device ID with online indicator, camera ID, and friendly last satisfied time.
+    - Snapshot Thumbnail Previews: Automatically embeds recent camera snapshot captures (`/snapshots/{routine_id}_latest.jpg`).
+  - Two-Column Activity & Audit Panels:
+    - Today's Activity Timeline: Chronological list of recent Ring events with relative timestamps and source tagging.
+    - Escalation & Caretaker Audit Log: Audit history of fired alerts, caretaker responses (False alarm vs Got it), and snapshot photo links.
+  - Connected Ring Hardware Table: Device IDs, online/offline status, last check-in times.
+- **REST JSON API (`GET /api/status`)**:
+  - Read-only endpoint returning current household state, calculated routine statuses, device health, recent events, and escalation history in JSON for programmatic clients or local automation.
+- **Secure Snapshot Static Server (`GET /snapshots/<filename>`)**:
+  - Direct local image delivery with MIME detection (`detect_image_mime`) and cache-control headers.
+  - Strict directory traversal protection: rejects `..`, path separators, and unresolved paths with HTTP 403 Forbidden.
+- **Health Check Endpoint (`GET /healthz`)**:
+  - Returns `{"status": "ok", "service": "threshold-dashboard"}` with HTTP 200.
+- **Daemon Integration (`src/threshold/daemon.py`)**:
+  - Added `dashboard_enabled: bool = True`, `dashboard_port: int = 8080`, and `dashboard_host: str = "0.0.0.0"` to `DaemonConfig`.
+  - `ThresholdDaemon` automatically launches the dashboard server in a background daemon thread on boot and terminates it gracefully on shutdown.
+  - Displays dashboard URL in the ASCII startup banner.
+- **CLI Subcommand (`src/threshold/__main__.py`)**:
+  - Added `python3 -m src.threshold dashboard [--config ...] [--db ...] [--port 8080] [--host 0.0.0.0]` for standalone dashboard hosting.
+  - Added `--no-dashboard`, `--dashboard-port`, and `--dashboard-host` overrides to the `run` daemon command.
+
+#### 2. Automated Test Verification
+- Created `tests/test_dashboard.py` with 9 integration and unit tests:
+  - `test_get_dashboard_data_structure`: Verifies data extraction and status derivation.
+  - `test_render_dashboard_html_contains_critical_elements`: Verifies HTML template rendering, meta refresh, headers, and cards.
+  - `test_dashboard_home_page_returns_200_html`: Verifies live HTTP GET `/` returns 200 with HTML content.
+  - `test_api_status_returns_200_json`: Verifies live HTTP GET `/api/status` returns 200 with JSON payload.
+  - `test_healthz_endpoint_returns_200_ok`: Verifies live HTTP GET `/healthz` returns 200.
+  - `test_snapshot_serving_valid_image`: Verifies live binary image serving with JPEG content-type.
+  - `test_snapshot_missing_returns_404`: Verifies missing snapshot returns 404 Not Found.
+  - `test_snapshot_directory_traversal_blocked`: Verifies path traversal attacks (`../`) are rejected with 403 or 404.
+  - `test_daemon_embeds_dashboard_server`: Verifies `ThresholdDaemon` boots dashboard server and cleans it up.
+- **Total Test Suite:** **164 tests passing** (`python3 -m unittest discover tests -v`) in $\approx 32.8$ seconds with 0 third-party pip dependencies.
+

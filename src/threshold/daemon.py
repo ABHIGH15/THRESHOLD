@@ -43,6 +43,10 @@ class DaemonConfig:
     staleness_threshold_minutes: int = 120
     reminder_delay_minutes: int = 15
     enable_polling: bool = True
+    dashboard_enabled: bool = True
+    dashboard_port: int = 8080
+    dashboard_host: str = "0.0.0.0"
+    snapshot_dir: str = "snapshots"
 
 
 def read_env_value(key: str, filepath: str = ".env") -> Optional[str]:
@@ -113,10 +117,18 @@ class ThresholdDaemon:
         self.polling_paused = False
         self.tick_count = 0
         self.poll_count = 0
+        self.dashboard_server = None
 
     def stop(self) -> None:
         """Signal the daemon to stop gracefully."""
         self.shutdown_requested = True
+        if self.dashboard_server:
+            try:
+                self.dashboard_server.shutdown()
+                self.dashboard_server.server_close()
+            except Exception:
+                pass
+            self.dashboard_server = None
 
     def build_startup_banner(self) -> str:
         """Generate formatted startup banner with routine breakdown."""
@@ -162,8 +174,14 @@ class ThresholdDaemon:
         banner_lines.extend([
             f"║  Polling:    {poll_str:<15} | Ticking: {tick_str:<18}║",
             f"║  Notifier:   {notifier_type:<47}║",
-            "╚══════════════════════════════════════════════════════════════╝",
         ])
+
+        if self.config.dashboard_enabled:
+            disp_host = "localhost" if self.config.dashboard_host in ("0.0.0.0", "127.0.0.1") else self.config.dashboard_host
+            dash_url = f"http://{disp_host}:{self.config.dashboard_port}"
+            banner_lines.append(f"║  Dashboard:  {dash_url:<47}║")
+
+        banner_lines.append("╚══════════════════════════════════════════════════════════════╝")
         return "\n".join(banner_lines)
 
     def tick_once(self, now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -313,6 +331,22 @@ class ThresholdDaemon:
         except Exception:
             pass
 
+        # Start local web dashboard if enabled
+        if self.config.dashboard_enabled and not self.dashboard_server:
+            try:
+                from src.threshold.dashboard import start_dashboard_server
+
+                self.dashboard_server = start_dashboard_server(
+                    db_path=self.config.db_path,
+                    port=self.config.dashboard_port,
+                    host=self.config.dashboard_host,
+                    household_name=self.config.household_name,
+                    timezone_name=self.config.timezone_name,
+                    snapshot_dir=self.config.snapshot_dir,
+                )
+            except Exception as exc:
+                logger.warning("Failed starting dashboard server: %s", exc)
+
         print(self.build_startup_banner())
         print(f"\nThreshold daemon started. Press Ctrl+C to stop.\n")
 
@@ -373,6 +407,14 @@ class ThresholdDaemon:
 
         finally:
             print("[SHUTDOWN] Threshold daemon stopped cleanly.")
+            if self.dashboard_server:
+                try:
+                    self.dashboard_server.shutdown()
+                    self.dashboard_server.server_close()
+                except Exception:
+                    pass
+                self.dashboard_server = None
+
             try:
                 set_app_state(self.conn, "daemon_status", "stopped")
                 set_app_state(self.conn, "daemon_stopped_at", self.clock.now().isoformat())

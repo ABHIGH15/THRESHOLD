@@ -230,6 +230,10 @@ def run_daemon_command(args: argparse.Namespace) -> int:
     else:
         notifier = ConsoleNotifier(ring_client=ring_client)
 
+    dashboard_enabled = not getattr(args, "no_dashboard", False)
+    dashboard_port = getattr(args, "dashboard_port", 8080)
+    dashboard_host = getattr(args, "dashboard_host", "0.0.0.0")
+
     config = DaemonConfig(
         db_path=args.db,
         poll_interval_seconds=float(poll_interval),
@@ -238,6 +242,9 @@ def run_daemon_command(args: argparse.Namespace) -> int:
         household_name=household,
         timezone_name=timezone_name,
         enable_polling=not args.no_poll,
+        dashboard_enabled=dashboard_enabled,
+        dashboard_port=dashboard_port,
+        dashboard_host=dashboard_host,
     )
 
     daemon = ThresholdDaemon(
@@ -366,6 +373,33 @@ def run_test_alert_command(args: argparse.Namespace) -> int:
         return 1
 
 
+def run_dashboard_cli(args: argparse.Namespace) -> int:
+    """Run standalone Threshold local web dashboard server."""
+    from src.threshold.dashboard import run_dashboard_command
+
+    load_env(".env")
+    config_path = find_config_file(args.config)
+    household = args.household or "Mom's House — Dallas"
+    tz_name = args.timezone or "America/Chicago"
+
+    if config_path:
+        try:
+            cfg = load_config_file(config_path)
+            household = args.household or cfg.household
+            tz_name = args.timezone or cfg.timezone
+        except Exception as exc:
+            print(f"[WARN] Failed loading config file: {exc}", file=sys.stderr)
+
+    return run_dashboard_command(
+        db_path=args.db,
+        port=args.port,
+        host=args.host,
+        household_name=household,
+        timezone_name=tz_name,
+        snapshot_dir=args.snapshot_dir,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m src.threshold",
@@ -407,6 +441,19 @@ def main() -> int:
     alert_parser.add_argument("--camera", default=None, help="Explicit snapshot camera device ID override")
     alert_parser.add_argument("--no-photo", action="store_true", help="Force text-only alert (disable snapshot)")
 
+    # dashboard
+    dash_parser = subparsers.add_parser(
+        "dashboard",
+        help="Launch the Threshold local web status dashboard",
+    )
+    dash_parser.add_argument("--config", "-c", default=None, help="Path to JSON config file (default: threshold.json)")
+    dash_parser.add_argument("--db", default="threshold.db", help="Path to SQLite database (default: threshold.db)")
+    dash_parser.add_argument("--port", "-p", type=int, default=8080, help="HTTP port to bind (default: 8080)")
+    dash_parser.add_argument("--host", default="0.0.0.0", help="HTTP host to bind (default: 0.0.0.0)")
+    dash_parser.add_argument("--household", default=None, help="Household display name")
+    dash_parser.add_argument("--timezone", default=None, help="Household timezone name")
+    dash_parser.add_argument("--snapshot-dir", default="snapshots", help="Directory where snapshots are saved (default: snapshots)")
+
     # run (daemon)
     run_parser = subparsers.add_parser(
         "run",
@@ -419,6 +466,9 @@ def main() -> int:
     run_parser.add_argument("--household", default=None, help="Household name (overrides config)")
     run_parser.add_argument("--timezone", default=None, help="Local timezone name (overrides config)")
     run_parser.add_argument("--no-poll", action="store_true", help="Disable Ring API polling (scheduler only)")
+    run_parser.add_argument("--no-dashboard", action="store_true", help="Disable embedded dashboard web server")
+    run_parser.add_argument("--dashboard-port", type=int, default=8080, help="Web dashboard port (default: 8080)")
+    run_parser.add_argument("--dashboard-host", default="0.0.0.0", help="Web dashboard host (default: 0.0.0.0)")
     run_parser.add_argument("--once", action="store_true", help="Execute single cycle and exit")
 
     args = parser.parse_args()
@@ -431,6 +481,8 @@ def main() -> int:
         return run_seed_command(args)
     elif args.subcommand == "test-alert":
         return run_test_alert_command(args)
+    elif args.subcommand == "dashboard":
+        return run_dashboard_cli(args)
     elif args.subcommand == "run":
         return run_daemon_command(args)
     else:

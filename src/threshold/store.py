@@ -568,3 +568,32 @@ def clear_snooze(conn: sqlite3.Connection, routine_id: str) -> None:
     conn.execute("UPDATE routines SET snoozed_until = NULL WHERE routine_id = ?", (routine_id,))
     conn.commit()
 
+
+def list_device_health(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Retrieve all device health records."""
+    cur = conn.execute("SELECT * FROM device_health ORDER BY device_id")
+    rows = []
+    for row in cur.fetchall():
+        d = dict(row)
+        d["online"] = bool(d["online"])
+        rows.append(d)
+    return rows
+
+
+def list_recent_events(conn: sqlite3.Connection, limit: int = 50) -> List[Dict[str, Any]]:
+    """Retrieve most recent events ordered by occurred_at DESC."""
+    cur = conn.execute(
+        "SELECT * FROM events ORDER BY occurred_at DESC, received_at DESC LIMIT ?",
+        (limit,),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def list_recent_escalations(conn: sqlite3.Connection, limit: int = 50) -> List[Dict[str, Any]]:
+    """Retrieve most recent escalations ordered by fired_at DESC."""
+    cur = conn.execute(
+        "SELECT * FROM escalations ORDER BY fired_at DESC LIMIT ?",
+        (limit,),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
