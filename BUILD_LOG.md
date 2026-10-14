@@ -1151,4 +1151,59 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
   - `test_html_modal_dialog_markup`: Verifies `<dialog>` element and modal trigger functions are embedded in HTML output.
 - **Total Test Suite:** **169 tests passing** (`python3 -m unittest discover tests -v`) in $\approx 35.3$ seconds with 0 third-party pip dependencies.
 
+---
+
+### Priority 5: Scripted Demo Package & Video Walkthrough Storyboard
+
+#### 1. Components Delivered
+- **Interactive & Automated Demo Engine (`src/threshold/demo.py`)**:
+  - Implements the complete 3-beat emotional hackathon narrative:
+    - **Beat 1: Empathy & Morning Routine Baseline (07:30 CDT)**:
+      - Simulates morning resident activity (front door paper walk).
+      - Event ingested via `ingest_event(source='history')`.
+      - Routine `rt_morning_door` transitions `watching` $\rightarrow$ `🟢 OBSERVED`.
+      - Local web dashboard updates live: 100% Wellness, 1 routine satisfied, 1 routine watching.
+    - **Beat 2: The Silence & Absence Detection (09:00 $\rightarrow$ 09:31 CDT)**:
+      - 09:00 CDT: Medicine cabinet window ends. 30-minute grace buffer remains active (status stays `🟡 WATCHING` — no false alarm panic).
+      - 09:31 CDT: 30-minute grace buffer expires. The room remains silent.
+      - Absence engine edge-transition triggers: `rt_morning_medicine` transitions `watching` $\rightarrow$ `🔴 MISSED`.
+      - Single-fire escalation row recorded in SQLite.
+      - Notifier captures real 104 KB Ring camera snapshot (`cam_kitchen_indoor`).
+      - Local dashboard flashes pulsing `.emergency-alert-banner`: *"URGENT CARE ALERT: 1 routine(s) missed expected activity window"*.
+      - Dispatches Telegram photo alert with inline buttons `[False alarm]` and `[Got it]`.
+      - Renders an ASCII smartphone notification card in terminal output.
+      - 09:45 CDT tick: Demonstrates strict deduplication (no duplicate alerts).
+    - **Beat 3: Caretaker Resolution & Graceful Recovery (09:35 $\rightarrow$ 10:00 CDT)**:
+      - Caregiver inspects kitchen snapshot, confirms resident is resting, and taps `[False alarm]`.
+      - SQLite records `corr_rt_morning_medicine_2026-10-12` in `corrections` and marks escalation `acked_at`.
+      - Routine status updates on dashboard to `🟢 Acknowledged (False alarm)`; emergency banner dismisses.
+      - 10:00 CDT: Delayed Ring event (from 08:30 CDT) backfills from event history.
+      - Routine updates to `🟢 OBSERVED` with complete escalation and correction audit trail preserved.
+    - **Hackathon Value Proposition & Pitch Card**:
+      - Prints high-impact summary of core differentiators: Zero AWS, Zero pip dependencies, deterministic state machine, photo alerts, and live verified hardware integration.
+  - Supports versatile execution flags:
+    - `--interactive` (`-i`): Step-by-step judge presentation pauses.
+    - `--fast` (`-f`): Non-blocking rapid demonstration for tests and CI.
+    - `--speed <float>`: Pacing delay multiplier.
+    - `--open` (`-o`): Auto-launches web dashboard in default browser.
+    - `--no-dashboard`: Terminal-only mode.
+    - `--telegram`: Dispatches real Telegram alert to phone if configured in `.env`.
+    - `--db <path>`: Isolated demo database specification.
+- **Standalone Executable Script (`scripts/run_demo.py`)**:
+  - Direct command-line entry point with executable permissions (`chmod +x`).
+- **CLI Subcommand Integration (`src/threshold/__main__.py`)**:
+  - Registered `python3 -m src.threshold demo` with full argument parsing and browser auto-launch.
+- **Video Production Script & Storyboard (`docs/DEMO_VIDEO_SCRIPT.md`)**:
+  - Complete 1:58 scene-by-scene script with timestamps, visual cues, verbatim audio narration, OBS screen layout, 45-second booth pitch, and judge Q&A defense cheat sheet.
+
+#### 2. Automated Test Verification
+- Created `tests/test_demo.py` with 5 unit and integration tests:
+  - `test_prepare_demo_snapshots_creates_valid_jpeg`: Verifies valid JPEG binary creation with magic bytes.
+  - `test_demo_notifier_recording`: Verifies in-memory escalation/reminder recording and snapshot tracking.
+  - `test_run_demo_fast_execution`: Verifies end-to-end 3-beat status progression, SQLite escalation, and correction rows.
+  - `test_run_demo_with_live_dashboard`: Verifies concurrent HTTP dashboard serving (`GET /` and `GET /api/status`) and graceful shutdown.
+  - `test_cli_demo_subcommand`: Verifies CLI subprocess execution of `threshold demo --fast --no-dashboard`.
+- **Total Test Suite:** **174 tests passing** (`python3 -m unittest discover tests -v`) in $\approx 35.9$ seconds with 0 third-party pip dependencies.
+
+
 

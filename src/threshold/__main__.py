@@ -401,6 +401,41 @@ def run_dashboard_cli(args: argparse.Namespace) -> int:
     )
 
 
+def run_demo_cli(args: argparse.Namespace) -> int:
+    """Execute the end-to-end 3-beat hackathon demonstration."""
+    import time
+    from src.threshold.demo import run_demo
+
+    load_env(".env")
+    speed = 0.0 if args.fast else args.speed
+    try:
+        res = run_demo(
+            db_path=args.db,
+            dashboard_port=args.port,
+            dashboard_host=args.host,
+            enable_dashboard=not args.no_dashboard,
+            open_browser=getattr(args, "open", False),
+            interactive=args.interactive,
+            speed=speed,
+            live_telegram=getattr(args, "telegram", False),
+            cleanup=False,
+        )
+        if not args.no_dashboard:
+            if args.interactive or getattr(args, "keep_running", False):
+                try:
+                    while True:
+                        time.sleep(1.0)
+                except KeyboardInterrupt:
+                    print("\nDemo stopped cleanly.")
+            else:
+                if speed > 0:
+                    time.sleep(1.5)
+        return 0 if res["success"] else 1
+    except KeyboardInterrupt:
+        print("\nDemo aborted by user.")
+        return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m src.threshold",
@@ -456,6 +491,22 @@ def main() -> int:
     dash_parser.add_argument("--snapshot-dir", default="snapshots", help="Directory where snapshots are saved (default: snapshots)")
     dash_parser.add_argument("--open", "-o", action="store_true", help="Automatically open dashboard in default browser")
 
+    # demo
+    demo_parser = subparsers.add_parser(
+        "demo",
+        help="Run the end-to-end 3-beat interactive or automated hackathon demo",
+    )
+    demo_parser.add_argument("--interactive", "-i", action="store_true", help="Prompt user between narrative beats")
+    demo_parser.add_argument("--fast", "-f", action="store_true", help="Run without artificial pacing delays")
+    demo_parser.add_argument("--speed", type=float, default=1.0, help="Pacing speed multiplier (default: 1.0)")
+    demo_parser.add_argument("--port", "-p", type=int, default=8080, help="Dashboard HTTP port (default: 8080)")
+    demo_parser.add_argument("--host", default="0.0.0.0", help="Dashboard HTTP host (default: 0.0.0.0)")
+    demo_parser.add_argument("--open", "-o", action="store_true", help="Open web dashboard in default browser")
+    demo_parser.add_argument("--no-dashboard", action="store_true", help="Disable embedded web status dashboard")
+    demo_parser.add_argument("--telegram", action="store_true", help="Send live Telegram photo alert if configured in .env")
+    demo_parser.add_argument("--db", default=None, help="Path to demo SQLite database (default: demo_threshold.db)")
+    demo_parser.add_argument("--keep-running", action="store_true", help="Keep dashboard running after demo concludes")
+
     # run (daemon)
     run_parser = subparsers.add_parser(
         "run",
@@ -485,6 +536,8 @@ def main() -> int:
         return run_test_alert_command(args)
     elif args.subcommand == "dashboard":
         return run_dashboard_cli(args)
+    elif args.subcommand == "demo":
+        return run_demo_cli(args)
     elif args.subcommand == "run":
         return run_daemon_command(args)
     else:
