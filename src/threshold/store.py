@@ -13,6 +13,8 @@ import os
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from src.threshold.models import Routine
+
 
 DEFAULT_DB_PATH = "threshold.db"
 
@@ -340,6 +342,46 @@ def get_routine(conn: sqlite3.Connection, routine_id: str) -> Optional[Dict[str,
     cur = conn.execute("SELECT * FROM routines WHERE routine_id = ?", (routine_id,))
     row = cur.fetchone()
     return dict(row) if row else None
+
+
+def row_to_routine(row: Union[sqlite3.Row, Dict[str, Any]]) -> Routine:
+    """Convert SQLite routines row dictionary/Row to Routine dataclass instance."""
+    row_dict = dict(row)
+    days_val = row_dict["days"]
+    if isinstance(days_val, str):
+        try:
+            days_list = json.loads(days_val)
+        except Exception:
+            days_list = [d.strip() for d in days_val.split(",") if d.strip()]
+    else:
+        days_list = list(days_val)
+
+    sat_dt = None
+    if row_dict.get("last_satisfied_at"):
+        sat_str = row_dict["last_satisfied_at"].replace("Z", "+00:00")
+        sat_dt = datetime.fromisoformat(sat_str)
+
+    snooze_dt = None
+    if row_dict.get("snoozed_until"):
+        snooze_str = row_dict["snoozed_until"].replace("Z", "+00:00")
+        snooze_dt = datetime.fromisoformat(snooze_str)
+
+    routine = Routine(
+        property_id=row_dict["property_id"],
+        name=row_dict["name"],
+        device_id=row_dict["device_id"],
+        expected_event_type=row_dict["expected_event_type"],
+        window_start=row_dict["window_start"],
+        window_end=row_dict["window_end"],
+        timezone=row_dict["timezone"],
+        days=days_list,
+        escalation_delay_minutes=row_dict.get("escalation_delay_minutes", 30),
+        last_satisfied_at=sat_dt,
+        snoozed_until=snooze_dt,
+        snapshot_device_id=row_dict.get("snapshot_device_id"),
+    )
+    routine.routine_id = row_dict["routine_id"]
+    return routine
 
 
 def update_routine_last_satisfied(

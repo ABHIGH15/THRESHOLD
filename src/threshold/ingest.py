@@ -12,7 +12,9 @@ import json
 import sqlite3
 from typing import Any, Dict, Optional, Union
 
+from src.threshold.status import event_satisfies_routine
 from src.threshold.store import (
+    row_to_routine,
     save_event,
     to_iso_timestamp,
     update_routine_last_satisfied,
@@ -79,20 +81,33 @@ def ingest_event(
             reported_at=None,
         )
 
-    # 3. Check for matching routines and advance last_satisfied_at if newer
+    # 3. Check for matching routines and advance last_satisfied_at if newer and in-window
     cur = conn.execute(
-        "SELECT routine_id, expected_sub_type, last_satisfied_at FROM routines "
+        "SELECT * FROM routines "
         "WHERE device_id = ? AND expected_event_type = ?",
         (device_id, event_type),
     )
     matching_routines = cur.fetchall()
 
-    for r in matching_routines:
-        expected_sub = r["expected_sub_type"]
+    clean_occ = occ_iso.replace("Z", "+00:00")
+    occ_dt = datetime.fromisoformat(clean_occ)
+    if occ_dt.tzinfo is None:
+        occ_dt = occ_dt.replace(tzinfo=timezone.utc)
+
+    for r_row in matching_routines:
+        expected_sub = r_row["expected_sub_type"]
         # Match if expected_sub_type is None/empty OR matches event sub_type
         if expected_sub is None or expected_sub == "" or expected_sub == sub_type:
-            current_satisfied = r["last_satisfied_at"]
-            if current_satisfied is None or occ_iso > current_satisfied:
-                update_routine_last_satisfied(conn, r["routine_id"], occ_iso)
+            routine = row_to_routine(r_row)
+            if event_satisfies_routine(routine, occ_dt):
+                current_sat_dt = routine.last_satisfied_at
+                # Compare timestamps as datetimes, never as strings
+                if current_sat_dt is None:
+                    update_routine_last_satisfied(conn, r_row["routine_id"], occ_iso)
+                else:
+                    if current_sat_dt.tzinfo is None:
+                        current_sat_dt = current_sat_dt.replace(tzinfo=timezone.utc)
+                    if occ_dt > current_sat_dt:
+                        update_routine_last_satisfied(conn, r_row["routine_id"], occ_iso)
 
     return True

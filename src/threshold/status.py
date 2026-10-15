@@ -11,7 +11,8 @@ The "unknown" state prevents escalating when device health is stale
 Only "missed" triggers Urgent. "unknown" does NOT escalate.
 """
 
-from datetime import datetime, timedelta, time as dt_time
+from datetime import datetime, timedelta, time as dt_time, timezone
+from typing import Union
 from zoneinfo import ZoneInfo
 
 from src.threshold.models import Routine, DeviceHealthRecord
@@ -80,14 +81,47 @@ def _is_routine_day(routine: Routine, now: datetime) -> bool:
     return day_name in routine.days
 
 
+def event_satisfies_routine(routine: Routine, occurred_at: Union[datetime, str, int, float]) -> bool:
+    """
+    Check if an event timestamp satisfies a routine.
+    Returns True only if occurred_at:
+      (a) falls on one of the routine's active days, and
+      (b) lies within [window_start, window_end + escalation_delay_minutes]
+          of the window that contains that event's own local date/time.
+    For overnight windows, an event after midnight belongs to the window
+    that started the previous evening.
+    """
+    if occurred_at is None:
+        return False
+
+    if isinstance(occurred_at, str):
+        clean_str = occurred_at.replace("Z", "+00:00")
+        occ_dt = datetime.fromisoformat(clean_str)
+    elif isinstance(occurred_at, (int, float)):
+        occ_dt = datetime.fromtimestamp(occurred_at / 1000.0 if occurred_at > 1e11 else occurred_at, tz=timezone.utc)
+    else:
+        occ_dt = occurred_at
+
+    tz = ZoneInfo(routine.timezone)
+    occ_aware = occ_dt if occ_dt.tzinfo else occ_dt.replace(tzinfo=tz)
+
+    if not _is_routine_day(routine, occ_aware):
+        return False
+
+    window_start, window_end = _get_today_window(routine, occ_aware)
+    grace_end = window_end + timedelta(minutes=routine.escalation_delay_minutes)
+
+    return window_start <= occ_aware <= grace_end
+
+
 def _last_satisfied_within_window(
     routine: Routine, window_start: datetime, window_end: datetime
 ) -> bool:
     """
     Check if last_satisfied_at falls within today's window.
 
-    Both the satisfaction timestamp and the window boundaries must be
-    compared in the same timezone context.
+    Uses event_satisfies_routine to verify satisfaction and ensures sat falls
+    within today's window (not a previous day's).
     """
     if routine.last_satisfied_at is None:
         return False
@@ -98,8 +132,11 @@ def _last_satisfied_within_window(
         tz = ZoneInfo(routine.timezone)
         sat = sat.replace(tzinfo=tz)
 
-    grace_end = window_end + timedelta(minutes=routine.escalation_delay_minutes)
-    return window_start <= sat <= grace_end
+    # Must be on or after today's window_start (not yesterday's satisfaction)
+    if sat < window_start:
+        return False
+
+    return event_satisfies_routine(routine, sat)
 
 
 def derive_status(
