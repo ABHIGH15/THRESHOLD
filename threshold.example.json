@@ -5,6 +5,8 @@
   "tick_interval_seconds": 60,
   "callback_interval_seconds": 2,
   "dashboard_port": 8080,
+  "snapshot_lookback_hours": 24,
+  "snapshot_deadline_seconds": 5.0,
   "routines": [
     {
       "id": "morning_medicine",

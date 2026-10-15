@@ -16,7 +16,7 @@ from src.threshold.config import find_config_file, load_config_file, seed_routin
 from src.threshold.daemon import DaemonConfig, ThresholdDaemon
 from src.threshold.models import Routine
 from src.threshold.notifier import ConsoleNotifier, TelegramNotifier
-from src.threshold.ring_client import RingAPIError, RingClient, TokenExpired
+from src.threshold.ring_client import MediaUnavailable, RingAPIError, RingClient, TokenExpired
 from src.threshold.store import init_db, ms_to_iso
 
 
@@ -90,6 +90,39 @@ def run_ring_check() -> int:
             print(f"    Events:      Failed to fetch ({e})")
 
         print("-" * 80)
+
+    # Latest snapshot in the last 24h check
+    if devices:
+        target_dev_id = devices[0].get("id")
+        try:
+            snap_bytes, captured_ms = client.get_latest_snapshot(target_dev_id, lookback_hours=24, deadline_seconds=5.0)
+            if captured_ms:
+                dt_utc = datetime.fromtimestamp(captured_ms / 1000.0, tz=timezone.utc)
+                dt_local = dt_utc.astimezone()
+                local_time_str = dt_local.strftime("%Y-%m-%d %H:%M:%S %Z")
+                now_dt = datetime.now(timezone.utc)
+                diff_sec = max(0, int((now_dt - dt_utc).total_seconds()))
+                if diff_sec < 60:
+                    age_str = "just now"
+                elif diff_sec < 3600:
+                    age_str = f"{diff_sec // 60}m ago"
+                elif diff_sec < 86400:
+                    age_str = f"{diff_sec // 3600}h ago"
+                else:
+                    age_str = f"{diff_sec // 86400}d ago"
+                print(f"Latest snapshot in the last 24h: HTTP 200, {len(snap_bytes)} bytes, captured {local_time_str} ({age_str})")
+            else:
+                print(f"Latest snapshot in the last 24h: HTTP 200, {len(snap_bytes)} bytes, captured (time unknown)")
+        except MediaUnavailable as exc:
+            if exc.status_code == 416 or (exc.code and "416" in exc.code) or "416" in str(exc) or "MEDIA_NOT_FOUND" in str(exc):
+                print("Latest snapshot in the last 24h: none in the last 24h (416)")
+            else:
+                print(f"Latest snapshot in the last 24h: unavailable ({exc.reason})")
+        except Exception as exc:
+            if "416" in str(exc):
+                print("Latest snapshot in the last 24h: none in the last 24h (416)")
+            else:
+                print(f"Latest snapshot in the last 24h: failed ({exc})")
 
     return 0
 

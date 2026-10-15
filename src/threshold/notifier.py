@@ -118,6 +118,52 @@ def format_last_activity(routine: Routine, device_health: Optional[Any] = None) 
     return window_str
 
 
+def format_snapshot_caption_prefix(
+    captured_at_ms: Optional[int],
+    timezone_name: str,
+    now: Optional[datetime] = None,
+) -> str:
+    """
+    Format photo caption prefix according to C2b specification:
+    - If captured_at_ms is present:
+      'Most recent camera image, taken HH:MM TZ (N min/h ago). Not live.'
+    - If captured_at_ms is None or invalid:
+      'Most recent camera image (capture time unknown). Not live.'
+    Times in the routine's local timezone.
+    """
+    if captured_at_ms is None:
+        return "Most recent camera image (capture time unknown). Not live."
+
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(timezone_name)
+        if now is None:
+            now = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+
+        dt_utc = datetime.fromtimestamp(captured_at_ms / 1000.0, tz=timezone.utc)
+        dt_local = dt_utc.astimezone(tz)
+        time_str = dt_local.strftime("%H:%M %Z")
+
+        diff_secs = max(0, int((now - dt_utc).total_seconds()))
+        if diff_secs < 60:
+            age_str = "just now"
+        elif diff_secs < 3600:
+            mins = diff_secs // 60
+            age_str = f"{mins} min ago" if mins != 1 else "1 min ago"
+        elif diff_secs < 86400:
+            hrs = diff_secs // 3600
+            age_str = f"{hrs} h ago" if hrs != 1 else "1 h ago"
+        else:
+            days = diff_secs // 86400
+            age_str = f"{days} d ago" if days != 1 else "1 d ago"
+
+        return f"Most recent camera image, taken {time_str} ({age_str}). Not live."
+    except Exception:
+        return "Most recent camera image (capture time unknown). Not live."
+
+
 def format_escalation_text(
     routine: Routine,
     fired_at: Union[str, datetime],
@@ -430,7 +476,9 @@ class TelegramNotifier(Notifier):
         base_url: str = "https://api.telegram.org",
         timeout: float = 10.0,
         ring_client: Optional[Any] = None,
-        snapshot_timeout: float = 4.0,
+        snapshot_timeout: float = 5.0,
+        snapshot_lookback_hours: int = 24,
+        snapshot_deadline_seconds: float = 5.0,
         snapshot_dir: Optional[str] = "snapshots",
     ):
         self.bot_token = bot_token
@@ -439,6 +487,10 @@ class TelegramNotifier(Notifier):
         self.timeout = float(timeout)
         self.last_offset: int = 0
         self.ring_client = ring_client
+        self.snapshot_lookback_hours = int(snapshot_lookback_hours)
+        if snapshot_timeout != 5.0 and snapshot_deadline_seconds == 5.0:
+            snapshot_deadline_seconds = snapshot_timeout
+        self.snapshot_deadline_seconds = float(snapshot_deadline_seconds)
         self.snapshot_timeout = float(snapshot_timeout)
         self.snapshot_dir = snapshot_dir
 
@@ -612,21 +664,37 @@ class TelegramNotifier(Notifier):
         target_cam_id = getattr(routine, "snapshot_device_id", None) or getattr(routine, "device_id", None)
         photo_sent = False
         saved_snapshot_path = None
+        delivered_caption = text
 
         if self.ring_client and target_cam_id:
             start_t = time.time()
             try:
-                now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-                photo_bytes = self.ring_client.get_snapshot(
-                    target_cam_id,
-                    timestamp_ms=now_ms,
-                    timeout=self.snapshot_timeout,
-                )
+                lookback = getattr(self, "snapshot_lookback_hours", 24)
+                deadline = getattr(self, "snapshot_deadline_seconds", getattr(self, "snapshot_timeout", 5.0))
+
+                captured_at_ms: Optional[int] = None
+                if hasattr(self.ring_client, "get_latest_snapshot"):
+                    photo_bytes, captured_at_ms = self.ring_client.get_latest_snapshot(
+                        target_cam_id,
+                        lookback_hours=lookback,
+                        deadline_seconds=deadline,
+                    )
+                else:
+                    # Legacy fallback for older test mocks
+                    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                    photo_bytes = self.ring_client.get_snapshot(
+                        target_cam_id,
+                        timestamp_ms=now_ms,
+                        timeout=deadline,
+                    )
+
                 if photo_bytes:
                     saved_snapshot_path = self._archive_snapshot(routine.routine_id, local_date, photo_bytes)
+                    cap_prefix = format_snapshot_caption_prefix(captured_at_ms, routine.timezone)
+                    delivered_caption = f"{cap_prefix}\n\n{text}"
                     self.send_photo(
                         photo_bytes=photo_bytes,
-                        caption=text,
+                        caption=delivered_caption,
                         reply_markup=keyboard,
                     )
                     photo_sent = True
@@ -661,7 +729,7 @@ class TelegramNotifier(Notifier):
             "type": "photo" if photo_sent else "text",
             "has_photo": photo_sent,
             "snapshot_path": saved_snapshot_path,
-            "caption": text,
+            "caption": delivered_caption,
         }
 
     def send_reminder(

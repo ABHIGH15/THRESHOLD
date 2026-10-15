@@ -10,6 +10,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from urllib.parse import parse_qs, urlparse
 
@@ -85,10 +86,24 @@ class FakeRingServerHandler(http.server.BaseHTTPRequestHandler):
 
         # Snapshot binary download endpoint (step 2 of snapshot flow)
         if path == "/download/snapshot_image.jpg":
-            # Record whether Authorization header was sent on this download request
             server.download_request_headers = headers_dict
+            if getattr(server, "download_stall_seconds", 0) > 0:
+                time.sleep(server.download_stall_seconds)
+
+            if getattr(server, "download_force_416", False):
+                self._send_json(416, {"error": "MEDIA_NOT_FOUND", "message": "No media in range"})
+                return
+
+            if getattr(server, "download_force_429", False):
+                self._send_json(429, {"error": "RATE_LIMITED", "message": "Too many requests"})
+                return
+
             self.send_response(200)
             self.send_header("Content-Type", "image/jpeg")
+            if getattr(server, "download_x_media_timestamp", None) is not None:
+                self.send_header("X-Media-Timestamp", str(server.download_x_media_timestamp))
+            if getattr(server, "download_last_modified", None) is not None:
+                self.send_header("Last-Modified", str(server.download_last_modified))
             self.end_headers()
             # Valid JPEG binary magic bytes + dummy payload
             self.wfile.write(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00\xff\xdbdummy_jpeg_data")
@@ -182,6 +197,10 @@ class FakeRingServerHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(422, {"error": "CORRUPT_RECORDING", "message": "Corrupt media stream"})
             return
 
+        if getattr(server, "force_post_429", False):
+            self._send_json(429, {"error": "RATE_LIMITED", "message": "Rate limited on POST"})
+            return
+
         # Snapshot initiation: /v1/devices/{id}/media/image/download
         if "/media/image/download" in path:
             # Ring returns 303 See Other with pre-signed Location URL
@@ -222,6 +241,12 @@ class TestRingClient(unittest.TestCase):
         self.server.force_media_416 = False
         self.server.force_media_425 = False
         self.server.force_media_422 = False
+        self.server.force_post_429 = False
+        self.server.download_force_416 = False
+        self.server.download_force_429 = False
+        self.server.download_stall_seconds = 0
+        self.server.download_x_media_timestamp = None
+        self.server.download_last_modified = None
         self.server.rate_limit_first_n = 0
 
         self.port = self.server.server_address[1]
@@ -413,6 +438,92 @@ class TestRingClient(unittest.TestCase):
         health2 = get_device_health(conn, "ava1.ring.device.TEST_CAM_1")
         self.assertEqual(health2["fetched_at"], "2026-10-12T14:30:00Z")
         conn.close()
+
+    def test_get_latest_snapshot_request_body_latest_in_range_and_clamped_lookback(self):
+        """get_latest_snapshot sends latest_in_range with clamped lookback and never sends Auth header to download host."""
+        import time
+        t_before = int(time.time() * 1000)
+
+        # 1. Test lookback clamped to 24h when passed 30h
+        img_bytes, captured_ms = self.client.get_latest_snapshot("ava1.ring.device.TEST_CAM_1", lookback_hours=30)
+        self.assertTrue(img_bytes.startswith(b"\xff\xd8"))
+
+        post_req = next(r for r in self.server.requests_log if r["method"] == "POST" and "/media/image/download" in r["path"])
+        payload = post_req["body"]
+        self.assertEqual(payload.get("type"), "latest_in_range")
+        self.assertNotIn("end_timestamp", payload)
+        expected_start = t_before - (24 * 3600 * 1000)
+        actual_start = payload.get("start_timestamp")
+        self.assertAlmostEqual(actual_start, expected_start, delta=25000)
+
+        # 2. Verify Authorization header was NOT sent to download host
+        self.assertIsNotNone(self.server.download_request_headers)
+        self.assertNotIn("authorization", [k.lower() for k in self.server.download_request_headers.keys()])
+
+    def test_get_latest_snapshot_416_on_get_raises_media_unavailable(self):
+        """HTTP 416 on download host GET raises MediaUnavailable."""
+        self.server.download_force_416 = True
+        with self.assertRaises(MediaUnavailable) as cm:
+            self.client.get_latest_snapshot("ava1.ring.device.TEST_CAM_1")
+        self.assertEqual(cm.exception.status_code, 416)
+
+    def test_get_latest_snapshot_416_and_425_on_post_raises_media_unavailable(self):
+        """HTTP 416 and 425 on initial POST raise MediaUnavailable."""
+        self.server.force_media_416 = True
+        with self.assertRaises(MediaUnavailable) as cm:
+            self.client.get_latest_snapshot("ava1.ring.device.TEST_CAM_1")
+        self.assertEqual(cm.exception.status_code, 416)
+
+        self.server.force_media_416 = False
+        self.server.force_media_425 = True
+        with self.assertRaises(MediaUnavailable) as cm2:
+            self.client.get_latest_snapshot("ava1.ring.device.TEST_CAM_1")
+        self.assertEqual(cm2.exception.status_code, 425)
+
+    def test_get_latest_snapshot_429_fails_immediately_without_sleeping(self):
+        """HTTP 429 on POST or GET raises RateLimited immediately and NEVER calls sleep."""
+        self.server.force_post_429 = True
+        with self.assertRaises(RateLimited):
+            self.client.get_latest_snapshot("ava1.ring.device.TEST_CAM_1")
+        self.assertEqual(len(self.sleep_calls), 0)
+
+        self.server.force_post_429 = False
+        self.server.download_force_429 = True
+        with self.assertRaises(RateLimited):
+            self.client.get_latest_snapshot("ava1.ring.device.TEST_CAM_1")
+        self.assertEqual(len(self.sleep_calls), 0)
+
+    def test_get_latest_snapshot_stalled_server_honors_deadline(self):
+        """A stalled server times out honoring the overall monotonic deadline within 0.5s margin."""
+        import time
+        self.server.download_stall_seconds = 2.0
+        t0 = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            self.client.get_latest_snapshot("ava1.ring.device.TEST_CAM_1", deadline_seconds=0.5)
+        elapsed = time.monotonic() - t0
+        self.assertLessEqual(elapsed, 1.0)  # deadline 0.5s + 0.5s margin
+
+    def test_get_latest_snapshot_header_present_absent_invalid(self):
+        """Headers present, absent, and out-of-bounds invalid are parsed correctly."""
+        import time
+        now_ms = int(time.time() * 1000)
+
+        # 1. Present valid
+        valid_ts = now_ms - (15 * 60 * 1000)
+        self.server.download_x_media_timestamp = valid_ts
+        _, cap1 = self.client.get_latest_snapshot("ava1.ring.device.TEST_CAM_1")
+        self.assertEqual(cap1, valid_ts)
+
+        # 2. Absent -> None
+        self.server.download_x_media_timestamp = None
+        self.server.download_last_modified = None
+        _, cap2 = self.client.get_latest_snapshot("ava1.ring.device.TEST_CAM_1")
+        self.assertIsNone(cap2)
+
+        # 3. Invalid (future beyond 5 min) -> None
+        self.server.download_x_media_timestamp = now_ms + (24 * 3600 * 1000)
+        _, cap3 = self.client.get_latest_snapshot("ava1.ring.device.TEST_CAM_1")
+        self.assertIsNone(cap3)
 
 
 if __name__ == "__main__":

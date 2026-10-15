@@ -11,8 +11,10 @@ Provides typed API client for Ring Partner API (api.amazonvision.com):
 """
 
 from datetime import datetime, timezone
+import email.utils
 import json
 import logging
+import socket
 import sqlite3
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -406,6 +408,175 @@ class RingClient:
             )
 
         return img_bytes
+
+    def get_latest_snapshot(
+        self,
+        device_id: str,
+        lookback_hours: int = 24,
+        deadline_seconds: float = 5.0,
+    ) -> Tuple[bytes, Optional[int]]:
+        """
+        Download the latest snapshot image for device using 'latest_in_range'.
+
+        Semantics:
+        - POST /v1/devices/{id}/media/image/download with:
+          {"type": "latest_in_range", "start_timestamp": now_ms - lookback_hours * 3600 * 1000}
+          (lookback clamped to 1..24 hours). No end_timestamp sent.
+        - ONE overall monotonic deadline (default 5.0s) across POST + redirect + GET + body read.
+        - Body read in chunks with deadline checks between chunks.
+        - 416 on GET, and 416/425/422 on POST -> MediaUnavailable.
+        - 429 -> RateLimited immediately (NO sleeping in this path).
+        - 401 -> TokenExpired.
+        - Authorization header NEVER sent to download host.
+        - Returns (image_bytes, captured_at_ms_or_None).
+        """
+        start_mono = time.monotonic()
+        deadline_mono = start_mono + float(deadline_seconds)
+
+        def remaining_timeout() -> float:
+            rem = deadline_mono - time.monotonic()
+            if rem <= 0:
+                raise TimeoutError("Snapshot deadline exceeded")
+            return rem
+
+        # 1. Prepare request payload with clamped lookback (1..24 hours)
+        # 15s clock skew margin ensures server-side window (now - start_ts) strictly <= 24h
+        clamped_lookback = max(1, min(24, int(lookback_hours)))
+        now_ms = int(time.time() * 1000)
+        start_ts = now_ms - (clamped_lookback * 3600 * 1000) + 15000
+
+        path = f"/v1/devices/{urllib.parse.quote(device_id)}/media/image/download"
+        post_url = urllib.parse.urljoin(self.base_url, path)
+        body_dict = {
+            "type": "latest_in_range",
+            "start_timestamp": start_ts,
+        }
+        body_bytes = json.dumps(body_dict).encode("utf-8")
+
+        post_req = urllib.request.Request(post_url, data=body_bytes, method="POST")
+        post_req.add_header("Authorization", f"Bearer {self.access_token}")
+        post_req.add_header("Content-Type", "application/json")
+        post_req.add_header("User-Agent", "Threshold/1.0")
+
+        post_opener = urllib.request.build_opener(NoRedirectHandler())
+        rem_t = remaining_timeout()
+
+        try:
+            with post_opener.open(post_req, timeout=rem_t) as resp:
+                post_status = resp.status if hasattr(resp, "status") else resp.getcode()
+                post_headers = dict(resp.headers)
+                post_resp_bytes = resp.read()
+        except urllib.error.HTTPError as err:
+            post_status = err.code
+            post_headers = dict(err.headers) if err.headers else {}
+            try:
+                post_resp_bytes = err.read()
+            except Exception:
+                post_resp_bytes = b""
+            finally:
+                err.close()
+
+            if post_status not in (301, 302, 303, 307, 308):
+                err_text = post_resp_bytes.decode("utf-8", errors="replace")
+                if post_status in (416, 422, 425):
+                    reason = "MEDIA_NOT_FOUND" if post_status == 416 else ("RECORDING_NOT_READY" if post_status == 425 else "CORRUPT_RECORDING")
+                    raise MediaUnavailable(err_text or reason, code=reason, status_code=post_status, response_body=err_text)
+                if post_status == 429:
+                    raise RateLimited("HTTP 429 Rate Limited (snapshot POST)", status_code=429, response_body=err_text)
+                if post_status == 401:
+                    raise TokenExpired("HTTP 401 Unauthorized", status_code=401, response_body=err_text)
+                if post_status == 403:
+                    raise Forbidden("HTTP 403 Forbidden", status_code=403, response_body=err_text)
+                if post_status == 404:
+                    raise NotFound("HTTP 404 Not Found", status_code=404, response_body=err_text)
+                if post_status == 400:
+                    raise BadRequest("HTTP 400 Bad Request", status_code=400, response_body=err_text)
+                if 500 <= post_status <= 599:
+                    raise ServerError(f"HTTP {post_status} Server Error", status_code=post_status, response_body=err_text)
+                raise RingAPIError(f"HTTP {post_status} Error", status_code=post_status, response_body=err_text)
+        except (socket.timeout, urllib.error.URLError) as exc:
+            if "timed out" in str(exc).lower():
+                raise TimeoutError(f"Snapshot POST timed out: {exc}") from None
+            raise RingAPIError(f"Snapshot POST failed: {self._redact_token(str(exc))}") from None
+
+        location_url = post_headers.get("Location") or post_headers.get("location")
+        if not location_url:
+            if post_status == 200 and post_resp_bytes:
+                return post_resp_bytes, None
+            raise MediaUnavailable("303 redirect missing Location header", code="MISSING_LOCATION", status_code=post_status)
+
+        # 2. GET image from download host WITHOUT Authorization header
+        get_req = urllib.request.Request(location_url, method="GET")
+        get_req.add_header("User-Agent", "Threshold/1.0")
+
+        rem_t = remaining_timeout()
+        try:
+            with urllib.request.urlopen(get_req, timeout=rem_t) as get_resp:
+                get_status = get_resp.status if hasattr(get_resp, "status") else get_resp.getcode()
+                get_headers = dict(get_resp.headers)
+
+                chunks = []
+                while True:
+                    remaining_timeout()
+                    chunk = get_resp.read(16384)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                img_bytes = b"".join(chunks)
+
+        except urllib.error.HTTPError as err:
+            get_status = err.code
+            get_headers = dict(err.headers) if err.headers else {}
+            try:
+                err_bytes = err.read()
+            except Exception:
+                err_bytes = b""
+            finally:
+                err.close()
+
+            err_text = err_bytes.decode("utf-8", errors="replace")
+            if get_status == 416:
+                raise MediaUnavailable(err_text or "No media found in range", code="MEDIA_NOT_FOUND", status_code=416, response_body=err_text)
+            if get_status == 429:
+                raise RateLimited("HTTP 429 Rate Limited on download host", status_code=429, response_body=err_text)
+            if get_status == 401:
+                raise TokenExpired("HTTP 401 Unauthorized on download host", status_code=401, response_body=err_text)
+            raise MediaUnavailable(f"Download host HTTP {get_status}: {err_text}", code=f"HTTP_{get_status}", status_code=get_status, response_body=err_text)
+        except (socket.timeout, urllib.error.URLError) as exc:
+            if "timed out" in str(exc).lower():
+                raise TimeoutError(f"Snapshot GET timed out: {exc}") from None
+            raise RingAPIError(f"Snapshot GET failed: {self._redact_token(str(exc))}") from None
+
+        if not img_bytes:
+            raise MediaUnavailable("Empty image binary received from download host", code="EMPTY_MEDIA", status_code=get_status)
+
+        # 3. Parse capture timestamp from headers
+        captured_at_ms: Optional[int] = None
+        x_media_ts = get_headers.get("X-Media-Timestamp") or get_headers.get("x-media-timestamp")
+        if x_media_ts:
+            try:
+                captured_at_ms = int(x_media_ts)
+            except (ValueError, TypeError):
+                captured_at_ms = None
+
+        if captured_at_ms is None:
+            last_mod = get_headers.get("Last-Modified") or get_headers.get("last-modified")
+            if last_mod:
+                try:
+                    parsed_dt = email.utils.parsedate_to_datetime(last_mod)
+                    captured_at_ms = int(parsed_dt.timestamp() * 1000)
+                except Exception:
+                    captured_at_ms = None
+
+        # Sanity check: must be <= now + 5 min and >= now - 180 days
+        if captured_at_ms is not None:
+            now_ms_check = int(time.time() * 1000)
+            max_future = now_ms_check + (5 * 60 * 1000)
+            min_past = now_ms_check - (180 * 24 * 3600 * 1000)
+            if not (min_past <= captured_at_ms <= max_future):
+                captured_at_ms = None
+
+        return img_bytes, captured_at_ms
 
 
 # --- 4. Polling Routine ---

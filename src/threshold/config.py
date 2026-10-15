@@ -78,6 +78,8 @@ class ThresholdConfig:
     tick_interval_seconds: float = 60.0
     callback_interval_seconds: float = 2.0
     dashboard_port: int = 8080
+    snapshot_lookback_hours: int = 24
+    snapshot_deadline_seconds: float = 5.0
     routines: List[RoutineConfig] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -89,6 +91,8 @@ class ThresholdConfig:
             "tick_interval_seconds": self.tick_interval_seconds,
             "callback_interval_seconds": self.callback_interval_seconds,
             "dashboard_port": self.dashboard_port,
+            "snapshot_lookback_hours": self.snapshot_lookback_hours,
+            "snapshot_deadline_seconds": self.snapshot_deadline_seconds,
             "routines": [r.to_dict() for r in self.routines],
         }
 
@@ -187,6 +191,18 @@ def load_config_from_dict(raw_data: Dict[str, Any]) -> ThresholdConfig:
         )
         routines.append(r_obj)
 
+    raw_lookback = data.get("snapshot_lookback_hours", 24)
+    try:
+        snapshot_lookback = max(1, min(24, int(raw_lookback)))
+    except (ValueError, TypeError):
+        snapshot_lookback = 24
+
+    raw_deadline = data.get("snapshot_deadline_seconds", 5.0)
+    try:
+        snapshot_deadline = max(0.5, float(raw_deadline))
+    except (ValueError, TypeError):
+        snapshot_deadline = 5.0
+
     config = ThresholdConfig(
         household=str(data.get("household", "Threshold Household")).strip(),
         timezone=str(data.get("timezone", "America/Chicago")).strip(),
@@ -194,6 +210,8 @@ def load_config_from_dict(raw_data: Dict[str, Any]) -> ThresholdConfig:
         tick_interval_seconds=float(data.get("tick_interval_seconds", 60.0)),
         callback_interval_seconds=float(data.get("callback_interval_seconds", 2.0)),
         dashboard_port=int(data.get("dashboard_port", 8080)),
+        snapshot_lookback_hours=snapshot_lookback,
+        snapshot_deadline_seconds=snapshot_deadline,
         routines=routines,
     )
 

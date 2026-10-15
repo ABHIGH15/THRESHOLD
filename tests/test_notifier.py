@@ -33,12 +33,13 @@ from src.threshold.notifier import (
     format_escalation_text,
     format_fired_at,
     format_last_activity,
+    format_snapshot_caption_prefix,
     make_callback_data,
     redact_telegram_token,
     resolve_callback_routine_id,
     truncate_caption,
 )
-from src.threshold.ring_client import MediaUnavailable
+from src.threshold.ring_client import MediaUnavailable, RateLimited
 from src.threshold.scheduler import FakeClock, Scheduler, run_scheduler_tick
 from src.threshold.store import (
     ack_escalation,
@@ -1423,16 +1424,111 @@ class TestNotifierSystem(unittest.TestCase):
 
         conn.close()
 
+    def test_caption_variants_header_present_absent_invalid(self):
+        """Verify the three caption variants rendered by format_snapshot_caption_prefix."""
+        # Variant 1: Header present and valid
+        now = datetime(2026, 10, 12, 14, 32, 0, tzinfo=timezone.utc)
+        cap_ms = 1791814643626  # 14:17:23 UTC -> 09:17 CDT (14m ago)
+        cap1 = format_snapshot_caption_prefix(cap_ms, "America/Chicago", now=now)
+        self.assertIn("Most recent camera image, taken 09:17 CDT (14 min ago). Not live.", cap1)
+
+        # Variant 2: Header absent
+        cap2 = format_snapshot_caption_prefix(None, "America/Chicago", now=now)
+        self.assertEqual(cap2, "Most recent camera image (capture time unknown). Not live.")
+
+        # Variant 3: Header invalid / unparseable
+        cap3 = format_snapshot_caption_prefix(None, "America/Chicago")
+        self.assertEqual(cap3, "Most recent camera image (capture time unknown). Not live.")
+
+    def test_send_escalation_with_snapshot_latest_in_range(self):
+        """send_escalation uses get_latest_snapshot, formats caption, and dispatches sendPhoto."""
+        mock_client = MockRingSnapshotClient(captured_at_ms=1791814643626)
+        notifier = TelegramNotifier(
+            bot_token="test_tok",
+            chat_id="5551234",
+            base_url=self.base_url,
+            ring_client=mock_client,
+            snapshot_lookback_hours=24,
+            snapshot_deadline_seconds=5.0,
+        )
+
+        res = notifier.send_escalation(
+            routine=self.sample_routine,
+            local_date="2026-10-12",
+            fired_at="2026-10-12T14:31:00Z",
+        )
+
+        self.assertEqual(res["type"], "photo")
+        self.assertTrue(res["has_photo"])
+        self.assertEqual(len(self.server.sent_photos), 1)
+        self.assertEqual(mock_client.requested_lookbacks, [24])
+
+        photo_req = self.server.sent_photos[0]
+        # Body contains multipart form with caption
+        body_str = photo_req["body"].decode("utf-8", errors="replace")
+        self.assertIn("Most recent camera image", body_str)
+        self.assertIn("Not live.", body_str)
+        self.assertIn("🚨 <b>THRESHOLD ESCALATION</b>", body_str)
+
+    def test_send_escalation_fallback_on_416_media_unavailable(self):
+        """When get_latest_snapshot raises MediaUnavailable (416), notifier immediately sends text alert."""
+        mock_client = MockRingSnapshotClient(raise_error=MediaUnavailable("No media found in range", status_code=416))
+        notifier = TelegramNotifier(
+            bot_token="test_tok",
+            chat_id="5551234",
+            base_url=self.base_url,
+            ring_client=mock_client,
+        )
+
+        res = notifier.send_escalation(
+            routine=self.sample_routine,
+            local_date="2026-10-12",
+            fired_at="2026-10-12T14:31:00Z",
+        )
+
+        self.assertEqual(res["type"], "text")
+        self.assertFalse(res["has_photo"])
+        self.assertEqual(len(self.server.sent_photos), 0)
+        self.assertEqual(len(self.server.sent_messages), 1)
+        self.assertIn("🚨 <b>THRESHOLD ESCALATION</b>", self.server.sent_messages[0]["text"])
+
+    def test_send_escalation_fallback_on_429_ratelimited_immediately(self):
+        """When get_latest_snapshot raises RateLimited (429), notifier immediately sends text alert without sleeping."""
+        mock_client = MockRingSnapshotClient(raise_error=RateLimited("Rate limited"))
+        notifier = TelegramNotifier(
+            bot_token="test_tok",
+            chat_id="5551234",
+            base_url=self.base_url,
+            ring_client=mock_client,
+        )
+
+        res = notifier.send_escalation(
+            routine=self.sample_routine,
+            local_date="2026-10-12",
+            fired_at="2026-10-12T14:31:00Z",
+        )
+
+        self.assertEqual(res["type"], "text")
+        self.assertEqual(len(self.server.sent_photos), 0)
+        self.assertEqual(len(self.server.sent_messages), 1)
+
 
 class MockRingSnapshotClient:
-    """Mock RingClient providing configurable get_snapshot responses."""
+    """Mock RingClient providing configurable get_snapshot and get_latest_snapshot responses."""
 
-    def __init__(self, snapshot_data: Optional[bytes] = None, raise_error: Optional[Exception] = None):
+    def __init__(
+        self,
+        snapshot_data: Optional[bytes] = None,
+        raise_error: Optional[Exception] = None,
+        captured_at_ms: Optional[int] = None,
+    ):
         self.snapshot_data = snapshot_data or (b"\xFF\xD8\xFF\xE0" + b"\x00" * 40)
         self.raise_error = raise_error
+        self.captured_at_ms = captured_at_ms
         self.requested_devices: List[str] = []
         self.requested_timestamps: List[int] = []
         self.requested_timeouts: List[Optional[float]] = []
+        self.requested_lookbacks: List[int] = []
 
     def get_snapshot(
         self,
@@ -1446,6 +1542,19 @@ class MockRingSnapshotClient:
         if self.raise_error:
             raise self.raise_error
         return self.snapshot_data
+
+    def get_latest_snapshot(
+        self,
+        device_id: str,
+        lookback_hours: int = 24,
+        deadline_seconds: float = 5.0,
+    ) -> Tuple[bytes, Optional[int]]:
+        self.requested_devices.append(device_id)
+        self.requested_lookbacks.append(lookback_hours)
+        self.requested_timeouts.append(deadline_seconds)
+        if self.raise_error:
+            raise self.raise_error
+        return self.snapshot_data, self.captured_at_ms
 
 
 if __name__ == "__main__":
