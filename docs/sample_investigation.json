@@ -1,0 +1,80 @@
+{
+  "event": {
+    "event_key": "evt_cam_front_yard_20261012_021000",
+    "device_id": "cam_front_yard",
+    "event_type": "motion_detected",
+    "sub_type": "human",
+    "occurred_at": "2026-10-12T07:10:00Z"
+  },
+  "investigation": {
+    "event_key": "evt_cam_front_yard_20261012_021000",
+    "mode": "replay (scripted)",
+    "provider_name": "mock_provider",
+    "steps": 5,
+    "elapsed_ms": 0,
+    "tier": "escalate",
+    "recommendation": "Unexpected motion at 02:10 outside routine window. Verified routine watching and camera snapshot confirmed.",
+    "fallback": false
+  },
+  "steps": [
+    {
+      "type": "call",
+      "tool": "check_routine_status",
+      "args": {
+        "device_id": "cam_front_yard"
+      },
+      "call_id": "call_1"
+    },
+    {
+      "type": "result",
+      "call_id": "call_1",
+      "tool": "check_routine_status",
+      "ok": true,
+      "text": "Routine 'Front Door Morning Activity' (rt_morning_front): watching (window 07:00-09:00 America/Chicago)",
+      "error": null
+    },
+    {
+      "type": "call",
+      "tool": "pull_snapshot",
+      "args": {
+        "device_id": "cam_front_yard"
+      },
+      "call_id": "call_2"
+    },
+    {
+      "type": "result",
+      "call_id": "call_2",
+      "tool": "pull_snapshot",
+      "ok": true,
+      "text": "Snapshot retrieved successfully for device cam_front_yard saved to snapshots/snapshot_cam_front_yard_20261012_071000.jpg (captured at 2026-10-12T10:13:20Z).",
+      "error": null
+    },
+    {
+      "type": "final",
+      "tier": "escalate",
+      "recommendation": "Unexpected motion at 02:10 outside routine window. Verified routine watching and camera snapshot confirmed.",
+      "cited_call_ids": [
+        "call_1",
+        "call_2"
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "tool": "check_routine_status",
+      "call_id": "call_1",
+      "ok": true,
+      "text": "Routine 'Front Door Morning Activity' (rt_morning_front): watching (window 07:00-09:00 America/Chicago)"
+    },
+    {
+      "tool": "pull_snapshot",
+      "call_id": "call_2",
+      "ok": true,
+      "text": "Snapshot retrieved successfully for device cam_front_yard saved to snapshots/snapshot_cam_front_yard_20261012_071000.jpg (captured at 2026-10-12T10:13:20Z)."
+    }
+  ],
+  "gate_decision": {
+    "decision": "escalate",
+    "reason_code": "cleared"
+  }
+}

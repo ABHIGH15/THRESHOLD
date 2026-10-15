@@ -1,0 +1,19 @@
+{
+  "provenance": "scripted",
+  "scenario": "Unexpected camera motion at 02:10 local, outside every routine window.",
+  "description": "Trace 3: Snapshot returns media unavailable and tier is check_needed.",
+  "steps": [
+    {
+      "type": "call",
+      "tool": "pull_snapshot",
+      "args": {"device_id": "cam_front"},
+      "call_id": "call_1"
+    },
+    {
+      "type": "final",
+      "tier": "check_needed",
+      "recommendation": "Unexpected motion at 02:10 outside routine window, but camera snapshot returned media unavailable.",
+      "cited_call_ids": ["call_1"]
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "provenance": "scripted",
+  "scenario": "Unexpected camera motion at 02:10 local, outside every routine window.",
+  "description": "Trace 1: Escalate tier with 2 successful tool results (routine check and snapshot).",
+  "steps": [
+    {
+      "type": "call",
+      "tool": "check_routine_status",
+      "args": {"device_id": "cam_front"},
+      "call_id": "call_1"
+    },
+    {
+      "type": "call",
+      "tool": "pull_snapshot",
+      "args": {"device_id": "cam_front"},
+      "call_id": "call_2"
+    },
+    {
+      "type": "final",
+      "tier": "escalate",
+      "recommendation": "Unexpected motion at 02:10 outside routine window. Verified routine watching and camera snapshot confirmed.",
+      "cited_call_ids": ["call_1", "call_2"]
+    }
+  ]
+}

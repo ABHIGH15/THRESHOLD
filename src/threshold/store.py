@@ -133,6 +133,22 @@ CREATE TABLE IF NOT EXISTS app_state (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS investigations (
+    id INTEGER PRIMARY KEY,
+    event_key TEXT NOT NULL UNIQUE,
+    device_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    provider_name TEXT NOT NULL,
+    tier TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    recommendation TEXT,
+    evidence_json TEXT,
+    trace_json TEXT,
+    notified_at TEXT
+);
 """
 
 
@@ -169,6 +185,26 @@ def init_db(conn_or_path: Optional[Union[sqlite3.Connection, str]] = None) -> sq
         pass
     try:
         conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS investigations (
+            id INTEGER PRIMARY KEY,
+            event_key TEXT NOT NULL UNIQUE,
+            device_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            provider_name TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            recommendation TEXT,
+            evidence_json TEXT,
+            trace_json TEXT,
+            notified_at TEXT
+        );
+        """)
     except sqlite3.OperationalError:
         pass
     conn.commit()
@@ -638,4 +674,103 @@ def list_recent_escalations(conn: sqlite3.Connection, limit: int = 50) -> List[D
         (limit,),
     )
     return [dict(row) for row in cur.fetchall()]
+
+
+def save_investigation(
+    conn: sqlite3.Connection,
+    event_key: str,
+    device_id: str,
+    created_at: Union[int, float, str, datetime],
+    mode: str,
+    provider_name: str,
+    tier: str,
+    decision: str,
+    reason_code: str,
+    recommendation: Optional[str] = None,
+    evidence_json: Optional[Union[str, List[Any], Dict[str, Any]]] = None,
+    trace_json: Optional[Union[str, List[Any], Dict[str, Any]]] = None,
+    notified_at: Optional[Union[int, float, str, datetime]] = None,
+) -> int:
+    """Save an agent investigation record."""
+    created_iso = to_iso_timestamp(created_at)
+    notified_iso = to_iso_timestamp(notified_at) if notified_at else None
+
+    if isinstance(evidence_json, (list, dict)):
+        evidence_str = json.dumps(evidence_json)
+    else:
+        evidence_str = evidence_json
+
+    if isinstance(trace_json, (list, dict)):
+        trace_str = json.dumps(trace_json)
+    else:
+        trace_str = trace_json
+
+    cur = conn.execute(
+        """
+        INSERT INTO investigations (
+            event_key, device_id, created_at, mode, provider_name,
+            tier, decision, reason_code, recommendation,
+            evidence_json, trace_json, notified_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(event_key) DO UPDATE SET
+            mode=excluded.mode,
+            provider_name=excluded.provider_name,
+            tier=excluded.tier,
+            decision=excluded.decision,
+            reason_code=excluded.reason_code,
+            recommendation=excluded.recommendation,
+            evidence_json=excluded.evidence_json,
+            trace_json=excluded.trace_json,
+            notified_at=coalesce(excluded.notified_at, investigations.notified_at)
+        """,
+        (
+            event_key,
+            device_id,
+            created_iso,
+            mode,
+            provider_name,
+            tier,
+            decision,
+            reason_code,
+            recommendation,
+            evidence_str,
+            trace_str,
+            notified_iso,
+        ),
+    )
+    conn.commit()
+    return cur.lastrowid or 0
+
+
+def list_investigations(
+    conn: sqlite3.Connection,
+    device_id: Optional[str] = None,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Retrieve investigations ordered by created_at DESC."""
+    if device_id:
+        cur = conn.execute(
+            "SELECT * FROM investigations WHERE device_id = ? ORDER BY created_at DESC LIMIT ?",
+            (device_id, limit),
+        )
+    else:
+        cur = conn.execute(
+            "SELECT * FROM investigations ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def get_investigation(
+    conn: sqlite3.Connection,
+    event_key: str,
+) -> Optional[Dict[str, Any]]:
+    """Retrieve an investigation by event_key."""
+    cur = conn.execute(
+        "SELECT * FROM investigations WHERE event_key = ?",
+        (event_key,),
+    )
+    row = cur.fetchone()
+    return dict(row) if row else None
+
 
