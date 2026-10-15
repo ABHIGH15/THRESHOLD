@@ -80,6 +80,7 @@ class AgentConfig:
     max_per_tick: int = 3
     notify_enabled: bool = False
     max_seconds_per_tick: float = 25.0
+    max_event_age_minutes: int = 120
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary representation."""
@@ -92,6 +93,7 @@ class AgentConfig:
             "max_per_tick": self.max_per_tick,
             "notify_enabled": self.notify_enabled,
             "max_seconds_per_tick": self.max_seconds_per_tick,
+            "max_event_age_minutes": self.max_event_age_minutes,
         }
 
 
@@ -201,6 +203,8 @@ def validate_config(config: ThresholdConfig) -> List[str]:
             raise ValueError("Config error: agent 'max_per_tick' must be positive")
         if config.agent.max_seconds_per_tick <= 0:
             raise ValueError("Config error: agent 'max_seconds_per_tick' must be positive")
+        if config.agent.max_event_age_minutes <= 0:
+            raise ValueError("Config error: agent 'max_event_age_minutes' must be positive")
 
     return warnings
 
@@ -258,6 +262,7 @@ def load_config_from_dict(raw_data: Dict[str, Any]) -> ThresholdConfig:
             max_per_tick=int(agent_data.get("max_per_tick", 3)),
             notify_enabled=bool(agent_data.get("notify_enabled", False)),
             max_seconds_per_tick=float(agent_data.get("max_seconds_per_tick", 25.0)),
+            max_event_age_minutes=int(agent_data.get("max_event_age_minutes", 120)),
         )
     else:
         agent_cfg = AgentConfig()

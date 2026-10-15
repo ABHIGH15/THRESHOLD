@@ -88,9 +88,27 @@ class MockProvider:
                 call_id=step_def.get("call_id", f"call_{step_index + 1}"),
             )
         elif step_type == "final":
+            rec = step_def["recommendation"]
+            if "{local_time}" in rec:
+                local_time_val = "02:10"
+                event = state.get("event", {})
+                occ_str = event.get("occurred_at")
+                if occ_str:
+                    try:
+                        clean_occ = occ_str.replace("Z", "+00:00")
+                        from datetime import datetime
+                        from zoneinfo import ZoneInfo
+                        occ_dt = datetime.fromisoformat(clean_occ)
+                        tz_name = event.get("timezone") or state.get("timezone", "America/Chicago")
+                        local_dt = occ_dt.astimezone(ZoneInfo(tz_name))
+                        local_time_val = local_dt.strftime("%H:%M")
+                    except Exception:
+                        pass
+                rec = rec.replace("{local_time}", local_time_val)
+
             return Final(
                 tier=step_def["tier"],
-                recommendation=step_def["recommendation"],
+                recommendation=rec,
                 cited_call_ids=list(step_def.get("cited_call_ids", [])),
             )
         else:

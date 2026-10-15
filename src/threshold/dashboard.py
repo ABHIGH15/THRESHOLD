@@ -18,6 +18,7 @@ import http.server
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -42,6 +43,7 @@ from src.threshold.store import (
     get_escalation,
     list_corrections,
     list_device_health,
+    list_investigations,
     list_recent_escalations,
     list_recent_events,
     list_routines,
@@ -91,7 +93,7 @@ STATUS_CONFIG = {
     },
     STATUS_UNKNOWN: {
         "label": "UNKNOWN",
-        "description": "Device Stale / Offline",
+        "description": "Unknown — device offline, not escalated",
         "color": "#e69542",
         "bg": "rgba(230, 149, 66, 0.15)",
         "border": "#633c17",
@@ -278,6 +280,22 @@ def get_dashboard_data(
         else:
             esc["snapshot_url"] = None
 
+    # Investigations (autonomous agent check-needed & gate decisions, latest 5)
+    raw_invs = list_investigations(conn, limit=5)
+    parsed_invs = []
+    for inv in raw_invs:
+        inv_item = dict(inv)
+        ev_json = inv_item.pop("evidence_json", None)
+        inv_item.pop("trace_json", None)
+        ev_list = []
+        if ev_json:
+            try:
+                ev_list = json.loads(ev_json) if isinstance(ev_json, str) else ev_json
+            except Exception:
+                ev_list = []
+        inv_item["evidence"] = ev_list
+        parsed_invs.append(inv_item)
+
     total_routines = len(routines_data)
     observed_pct = int((observed_count / total_routines * 100)) if total_routines > 0 else 100
 
@@ -287,6 +305,7 @@ def get_dashboard_data(
         "current_time_str": local_time_str,
         "current_date_str": local_date_str,
         "now_iso": now.isoformat(),
+        "snapshot_dir": snapshot_dir,
         "daemon": {
             "status": daemon_status,
             "started_at": daemon_started,
@@ -310,6 +329,7 @@ def get_dashboard_data(
         "devices": devices,
         "recent_events": events,
         "recent_escalations": escalations,
+        "investigations": parsed_invs,
     }
 
 
@@ -385,6 +405,7 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
             <span class="card-meta-days">{days_str}</span>
           </div>
           <h3 class="card-title">{r_name}</h3>
+          <div class="card-status-desc" style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 8px;">{html.escape(r.get('status_desc', ''))}</div>
           <div class="card-window">
             <span class="icon">⏰</span> Window: <b>{r_window}</b> <span class="delay-tag">+{r_delay}m buffer</span>
           </div>
@@ -403,6 +424,189 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
         """)
 
     routines_grid = "\n".join(cards_html) if cards_html else "<div class='empty-state'>No routines configured. Run <code>python3 -m src.threshold seed</code> to load household routines.</div>"
+
+    # Map reason codes to plain words
+    reason_code_labels = {
+        "quiet_hours_unexpected_activity": "Unexpected activity during quiet hours",
+        "insufficient_tool_results": "Insufficient tool verification (< 2 distinct tools)",
+        "silent_device": "Device offline or stale",
+        "repeated_false_alarms": "Household memory shows repeated past false alarms",
+        "rate_limit_exceeded": "Agent escalation rate limit exceeded",
+        "routine_snoozed": "Associated routine currently snoozed",
+        "device_not_healthy": "Device health check not clean",
+        "error": "Investigation encountered an execution error",
+    }
+
+    # Render Check Needed panel (newest first)
+    check_needed_cards = []
+    tz_name_str = data.get("timezone", "America/Chicago")
+    try:
+        tz_info = ZoneInfo(tz_name_str)
+    except Exception:
+        tz_info = timezone.utc
+    dash_snapshot_dir = data.get("snapshot_dir", "snapshots")
+
+    for inv in data.get("investigations", []):
+        inv_dev = html.escape(str(inv.get("device_id", "unknown")))
+
+        # Local time formatting
+        created_at_str = inv.get("created_at", "")
+        local_time_display = created_at_str
+        if created_at_str:
+            try:
+                clean_ts = created_at_str.replace("Z", "+00:00")
+                dt_utc = datetime.fromisoformat(clean_ts)
+                if dt_utc.tzinfo is None:
+                    dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+                dt_loc = dt_utc.astimezone(tz_info)
+                local_time_display = dt_loc.strftime("%H:%M %Z (%Y-%m-%d)")
+            except Exception:
+                local_time_display = created_at_str
+        local_time_display = html.escape(local_time_display)
+
+        # Tier & Gate Decision badges (using strict labels: "Routine", "Check needed", "Escalation", never "Urgent")
+        tier_val = str(inv.get("tier", "check_needed"))
+        decision_val = str(inv.get("decision", "check_needed"))
+
+        if decision_val == "escalate":
+            decision_label = "Escalation"
+            decision_cls = "badge-red"
+        elif decision_val == "check_needed":
+            decision_label = "Check needed"
+            decision_cls = "badge-amber"
+        else:
+            decision_label = "Routine"
+            decision_cls = "badge-green"
+
+        tier_label_text = f"Tier: {tier_val}"
+        tier_cls = "badge-amber" if tier_val == "check_needed" else ("badge-red" if tier_val == "escalate" else "badge-green")
+
+        # Reason code in plain words
+        raw_reason = str(inv.get("reason_code", ""))
+        reason_plain = reason_code_labels.get(raw_reason, raw_reason.replace("_", " ").capitalize())
+        reason_display = html.escape(reason_plain)
+
+        # Recommendation with mode label
+        rec_display = html.escape(str(inv.get("recommendation", "No recommendation provided.")))
+
+        # Evidence lines
+        ev_items = inv.get("evidence", [])
+        evidence_lines_html = []
+        cited_pull_snapshot_ok = False
+        snapshot_filename = None
+
+        for ev in ev_items:
+            ev_tool = html.escape(str(ev.get("tool", "tool")))
+            ev_ok = bool(ev.get("ok", False))
+            ev_text = html.escape(str(ev.get("text", "")))
+
+            if ev.get("tool") == "pull_snapshot" and ev_ok:
+                cited_pull_snapshot_ok = True
+                raw_text = str(ev.get("text", ""))
+                m = re.search(r"saved to\s+([^\s,]+)", raw_text)
+                if m:
+                    snapshot_filename = os.path.basename(m.group(1))
+
+            if ev_ok:
+                evidence_lines_html.append(f"""
+                <li class="evidence-line ev-ok">
+                  <span class="ev-mark">✓</span>
+                  <span class="ev-tool">{ev_tool}:</span>
+                  <span class="ev-text">{ev_text}</span>
+                </li>
+                """)
+            else:
+                evidence_lines_html.append(f"""
+                <li class="evidence-line ev-fail">
+                  <span class="ev-mark">✗</span>
+                  <span class="ev-tool">{ev_tool}:</span>
+                  <span class="ev-text">{ev_text}</span>
+                </li>
+                """)
+
+        if evidence_lines_html:
+            evidence_html = f"<ul class='evidence-list'>{''.join(evidence_lines_html)}</ul>"
+        else:
+            evidence_html = "<div class='evidence-empty'>None recorded.</div>"
+
+        # Snapshot thumbnail ONLY when snapshot file exists AND investigation cited a successful pull_snapshot
+        snapshot_html = ""
+        has_snapshot = False
+        if cited_pull_snapshot_ok and snapshot_filename:
+            candidate_path = os.path.join(dash_snapshot_dir, snapshot_filename)
+            if os.path.isfile(candidate_path):
+                has_snapshot = True
+                safe_snap_url = f"/snapshots/{html.escape(snapshot_filename)}"
+                snapshot_html = f"""
+                <div class="inv-snapshot-box">
+                  <a href="{safe_snap_url}" onclick="openSnapshotModal('{safe_snap_url}', 'Camera Snapshot — {inv_dev}'); return false;" title="Click for Fullscreen Preview">
+                    <img src="{safe_snap_url}" class="inv-thumb" alt="Camera Snapshot" />
+                    <span class="thumb-badge">📷 Click to Expand</span>
+                  </a>
+                </div>
+                """
+
+        if not has_snapshot:
+            snapshot_html = '<div class="inv-no-snapshot">No camera image available</div>'
+
+        check_needed_cards.append(f"""
+        <div class="check-needed-card">
+          <div class="cn-header">
+            <div class="cn-title-group">
+              <span class="cn-time">{local_time_display}</span>
+              <span class="cn-device">Device: <code>{inv_dev}</code></span>
+            </div>
+            <div class="cn-badges">
+              <span class="badge {tier_cls}">{html.escape(tier_label_text)}</span>
+              <span class="badge {decision_cls}">{html.escape(decision_label)}</span>
+            </div>
+          </div>
+          <div class="cn-reason">
+            <span class="cn-label" style="color: var(--text-muted); font-size: 0.85rem;">Reason:</span> <b>{reason_display}</b>
+          </div>
+          <div class="cn-rec">
+            {rec_display}
+          </div>
+          <div class="cn-body">
+            <div class="cn-evidence">
+              <div class="cn-evidence-title">Gathered Evidence:</div>
+              {evidence_html}
+            </div>
+            <div class="cn-media">
+              {snapshot_html}
+            </div>
+          </div>
+        </div>
+        """)
+
+    if check_needed_cards:
+        check_needed_panel_html = f"""
+        <div class="check-needed-section">
+          <div class="section-header">
+            <div class="section-title">
+              <span>Check Needed Investigations</span>
+            </div>
+            <div class="section-meta">Autonomous Agent • Verification Gate Audit Trail</div>
+          </div>
+          <div class="check-needed-grid">
+            {''.join(check_needed_cards)}
+          </div>
+        </div>
+        """
+    else:
+        check_needed_panel_html = """
+        <div class="check-needed-section">
+          <div class="section-header">
+            <div class="section-title">
+              <span>Check Needed Investigations</span>
+            </div>
+            <div class="section-meta">Autonomous Agent • Verification Gate Audit Trail</div>
+          </div>
+          <div class="empty-state" style="margin-top: 12px;">
+            No check-needed investigations recorded. System operating normally.
+          </div>
+        </div>
+        """
 
     # Render event timeline rows
     event_rows = []
@@ -832,6 +1036,182 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
       background: #000;
     }}
 
+    /* Check Needed Panel Styles */
+    .check-needed-section {{
+      margin-top: 32px;
+      margin-bottom: 32px;
+    }}
+    .check-needed-grid {{
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      margin-top: 14px;
+    }}
+    .check-needed-card {{
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px 22px;
+      transition: border-color 0.2s;
+    }}
+    .check-needed-card:hover {{
+      border-color: #5c4a28;
+    }}
+    .cn-header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }}
+    .cn-title-group {{
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      flex-wrap: wrap;
+    }}
+    .cn-time {{
+      font-weight: 700;
+      font-size: 1.05rem;
+      color: var(--text);
+    }}
+    .cn-device {{
+      color: var(--text-muted);
+      font-size: 0.88rem;
+    }}
+    .cn-badges {{
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }}
+    .badge-amber {{
+      background: rgba(212, 160, 74, 0.15);
+      color: var(--amber);
+      border: 1px solid #5c4a28;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }}
+    .badge-red {{
+      background: rgba(212, 105, 90, 0.18);
+      color: var(--coral);
+      border: 1px solid #5c302a;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }}
+    .badge-green {{
+      background: rgba(109, 184, 143, 0.15);
+      color: var(--green);
+      border: 1px solid #3a5c48;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }}
+    .cn-reason {{
+      margin-bottom: 8px;
+      font-size: 0.95rem;
+    }}
+    .cn-rec {{
+      margin-bottom: 14px;
+      font-size: 0.92rem;
+      line-height: 1.45;
+      background: rgba(255, 255, 255, 0.03);
+      padding: 10px 14px;
+      border-radius: 8px;
+      border-left: 3px solid var(--amber);
+      color: var(--text);
+    }}
+    .cn-body {{
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 20px;
+      align-items: start;
+    }}
+    .cn-evidence {{
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 0;
+    }}
+    .cn-evidence-title {{
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      font-weight: 700;
+      margin-bottom: 4px;
+    }}
+    .evidence-list {{
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }}
+    .evidence-line {{
+      font-size: 0.88rem;
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }}
+    .ev-ok .ev-mark {{
+      color: var(--green);
+      font-weight: bold;
+    }}
+    .ev-fail .ev-mark {{
+      color: var(--coral);
+      font-weight: bold;
+    }}
+    .ev-tool {{
+      color: var(--text-muted);
+      font-size: 0.82rem;
+      font-weight: 600;
+    }}
+    .ev-text {{
+      color: var(--text);
+    }}
+    .evidence-empty {{
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      font-style: italic;
+    }}
+    .cn-media {{
+      min-width: 150px;
+    }}
+    .inv-snapshot-box {{
+      position: relative;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }}
+    .inv-thumb {{
+      width: 160px;
+      height: 110px;
+      object-fit: cover;
+      display: block;
+      cursor: zoom-in;
+      transition: opacity 0.2s;
+    }}
+    .inv-thumb:hover {{
+      opacity: 0.9;
+    }}
+    .inv-no-snapshot {{
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      font-style: italic;
+      padding: 16px 14px;
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      text-align: center;
+      max-width: 160px;
+    }}
+
     /* Split Sections (Activity & Escalations) */
     .split-grid {{
       display: grid;
@@ -841,6 +1221,9 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
     }}
     @media (max-width: 900px) {{
       .split-grid {{ grid-template-columns: 1fr; }}
+      .cn-body {{ grid-template-columns: 1fr; }}
+      .inv-thumb {{ width: 100%; height: 180px; }}
+      .inv-no-snapshot {{ max-width: 100%; }}
     }}
     .panel {{
       background: var(--surface);
@@ -1007,7 +1390,7 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
         <div class="metric-sub">Within window or pending</div>
       </div>
       <div class="metric-card">
-        <div class="metric-label">Missed / Urgent</div>
+        <div class="metric-label">Missed / Escalation</div>
         <div class="metric-value" style="color: var(--coral);">{summary.get('missed_count', 0)}</div>
         <div class="metric-sub">{summary.get('missed_count', 0)} unaddressed misses</div>
       </div>
@@ -1034,6 +1417,9 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
     <div class="routines-grid">
       {routines_grid}
     </div>
+
+    <!-- Check Needed Investigations Panel -->
+    {check_needed_panel_html}
 
     <!-- Split Panel: Event Timeline & Escalations -->
     <div class="split-grid">
@@ -1183,30 +1569,40 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
 
         # Snapshot static serving with strict directory traversal protection
         if path.startswith("/snapshots/"):
-            raw_filename = path[len("/snapshots/"):]
-            filename = os.path.basename(raw_filename)
+            raw_url_path = self.path[len("/snapshots/"):]
+            decoded_path = urllib.parse.unquote(raw_url_path)
 
-            # Prevent directory traversal or sneaky path manipulations
-            if ".." in raw_filename or "/" in raw_filename or "\\" in raw_filename or filename != raw_filename:
-                self._send_response(403, "text/plain", b"Forbidden: Invalid file path")
+            # Prevent directory traversal, path separators, or suspicious encodings -> 404
+            if ".." in raw_url_path or ".." in decoded_path or "/" in decoded_path or "\\" in decoded_path or "%2e" in raw_url_path.lower():
+                self._send_response(404, "text/plain", b"Not Found")
+                return
+
+            filename = os.path.basename(decoded_path)
+            if not filename or filename != decoded_path:
+                self._send_response(404, "text/plain", b"Not Found")
                 return
 
             snapshot_dir = getattr(self.server, "snapshot_dir", "snapshots")
             file_path = os.path.join(snapshot_dir, filename)
 
-            # Ensure resolved path is strictly within snapshot_dir
-            real_base = os.path.realpath(snapshot_dir)
-            real_target = os.path.realpath(file_path)
-            if not real_target.startswith(real_base):
-                self._send_response(403, "text/plain", b"Forbidden: Path traversal detected")
+            # Reject symlinks -> 404
+            if os.path.islink(file_path):
+                self._send_response(404, "text/plain", b"Not Found")
                 return
 
-            if not os.path.isfile(file_path):
+            # Ensure resolved path is strictly inside snapshot_dir
+            real_base = os.path.realpath(snapshot_dir)
+            real_target = os.path.realpath(file_path)
+            if not real_target.startswith(real_base) or os.path.dirname(real_target) != real_base:
+                self._send_response(404, "text/plain", b"Not Found")
+                return
+
+            if not os.path.isfile(real_target):
                 self._send_response(404, "text/plain", b"Snapshot Not Found")
                 return
 
             try:
-                with open(file_path, "rb") as f:
+                with open(real_target, "rb") as f:
                     img_bytes = f.read()
                 mime = detect_image_mime(img_bytes)
                 if mime == "application/octet-stream":
@@ -1222,11 +1618,54 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         timezone_name = getattr(self.server, "timezone_name", "America/Chicago")
         snapshot_dir = getattr(self.server, "snapshot_dir", "snapshots")
 
+        # GET /api/investigations endpoint
+        if path == "/api/investigations":
+            query_params = urllib.parse.parse_qs(parsed_url.query)
+            limit_str = query_params.get("limit", ["20"])[0]
+            try:
+                limit_val = int(limit_str)
+            except ValueError:
+                limit_val = 20
+            limit_val = max(1, min(100, limit_val))
+
+            try:
+                conn = get_connection(db_path)
+                try:
+                    raw_invs = list_investigations(conn, limit=limit_val)
+                finally:
+                    conn.close()
+            except Exception as exc:
+                self._send_response(500, "text/plain", f"Database error: {exc}".encode("utf-8"))
+                return
+
+            parsed_invs = []
+            for inv in raw_invs:
+                inv_item = dict(inv)
+                ev_json = inv_item.pop("evidence_json", None)
+                inv_item.pop("trace_json", None)
+                ev_list = []
+                if ev_json:
+                    try:
+                        ev_list = json.loads(ev_json) if isinstance(ev_json, str) else ev_json
+                    except Exception:
+                        ev_list = []
+                inv_item["evidence"] = ev_list
+                parsed_invs.append(inv_item)
+
+            resp_bytes = json.dumps(parsed_invs, indent=2).encode("utf-8")
+            self._send_response(200, "application/json", resp_bytes)
+            return
+
+        clock = getattr(self.server, "clock", None)
+        sim_now = getattr(self.server, "simulated_now", None)
+        req_now = clock.now() if clock else (sim_now if sim_now else None)
+
         try:
             conn = get_connection(db_path)
             try:
                 data = get_dashboard_data(
                     conn=conn,
+                    now=req_now,
                     household_name=household_name,
                     timezone_name=timezone_name,
                     snapshot_dir=snapshot_dir,
@@ -1271,6 +1710,22 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         # 404 for any other path
         self._send_response(404, "text/plain", b"Not Found")
 
+    def do_POST(self) -> None:
+        """Reject POST requests: dashboard is strictly read-only."""
+        self._send_response(405, "text/plain", b"Method Not Allowed: Dashboard is strictly read-only")
+
+    def do_PUT(self) -> None:
+        """Reject PUT requests: dashboard is strictly read-only."""
+        self._send_response(405, "text/plain", b"Method Not Allowed: Dashboard is strictly read-only")
+
+    def do_DELETE(self) -> None:
+        """Reject DELETE requests: dashboard is strictly read-only."""
+        self._send_response(405, "text/plain", b"Method Not Allowed: Dashboard is strictly read-only")
+
+    def do_PATCH(self) -> None:
+        """Reject PATCH requests: dashboard is strictly read-only."""
+        self._send_response(405, "text/plain", b"Method Not Allowed: Dashboard is strictly read-only")
+
 
 class DashboardServer(http.server.ThreadingHTTPServer):
     """Configured ThreadingHTTPServer holding dashboard configuration."""
@@ -1286,25 +1741,32 @@ class DashboardServer(http.server.ThreadingHTTPServer):
         household_name: str = "Mom's House — Dallas",
         timezone_name: str = "America/Chicago",
         snapshot_dir: str = "snapshots",
+        clock: Optional[Any] = None,
+        simulated_now: Optional[datetime] = None,
     ):
         super().__init__(server_address, RequestHandlerClass)
         self.db_path = db_path
         self.household_name = household_name
         self.timezone_name = timezone_name
         self.snapshot_dir = snapshot_dir
+        self.clock = clock
+        self.simulated_now = simulated_now
 
 
 def start_dashboard_server(
     db_path: str = "threshold.db",
     port: int = 8080,
-    host: str = "0.0.0.0",
+    host: str = "127.0.0.1",
     household_name: str = "Mom's House — Dallas",
     timezone_name: str = "America/Chicago",
     snapshot_dir: str = "snapshots",
     fallback_ports: bool = True,
+    clock: Optional[Any] = None,
+    simulated_now: Optional[datetime] = None,
 ) -> DashboardServer:
     """
     Instantiate and start the dashboard HTTP server on a background daemon thread.
+    Default bind host is 127.0.0.1.
     Includes port collision fallback protection (e.g. if port 8080 is bound, tries 8081..8085).
     Returns the running DashboardServer instance.
     """
@@ -1321,6 +1783,8 @@ def start_dashboard_server(
                 household_name=household_name,
                 timezone_name=timezone_name,
                 snapshot_dir=snapshot_dir,
+                clock=clock,
+                simulated_now=simulated_now,
             )
             break
         except OSError as exc:
@@ -1338,7 +1802,7 @@ def start_dashboard_server(
 def run_dashboard_command(
     db_path: str = "threshold.db",
     port: int = 8080,
-    host: str = "0.0.0.0",
+    host: str = "127.0.0.1",
     household_name: str = "Mom's House — Dallas",
     timezone_name: str = "America/Chicago",
     snapshot_dir: str = "snapshots",
@@ -1347,7 +1811,20 @@ def run_dashboard_command(
     """
     CLI command entry point: starts dashboard HTTP server and blocks until SIGINT/SIGTERM.
     Optionally launches default browser if open_browser=True.
+    Default bind host is 127.0.0.1. Prints security warning if binding to non-loopback address.
     """
+    if host not in ("127.0.0.1", "localhost"):
+        logger.warning(
+            "[SECURITY WARNING] Dashboard is binding to non-loopback host '%s'. "
+            "The web dashboard displays camera images and status without authentication.",
+            host,
+        )
+        print(
+            f"[SECURITY WARNING] Dashboard is binding to non-loopback host '{host}'. "
+            "The web dashboard displays camera images and status without authentication.",
+            file=sys.stderr,
+        )
+
     server = start_dashboard_server(
         db_path=db_path,
         port=port,

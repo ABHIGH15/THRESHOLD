@@ -43,6 +43,7 @@
     "dedupe_minutes": 30,
     "max_per_tick": 3,
     "notify_enabled": false,
-    "max_seconds_per_tick": 25.0
+    "max_seconds_per_tick": 25.0,
+    "max_event_age_minutes": 120
   }
 }

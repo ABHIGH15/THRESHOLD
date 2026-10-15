@@ -60,6 +60,9 @@ def format_agent_notification_text(
     evidence_block = "\n".join(evidence_lines) if evidence_lines else "None recorded."
 
     mode_label = f"({investigation.mode})"
+    rec_text = investigation.recommendation
+    if not rec_text.startswith(mode_label) and not rec_text.startswith("(replay"):
+        rec_text = f"{mode_label} {rec_text}"
 
     text = (
         f"<b>CHECK NEEDED</b>\n\n"
@@ -67,7 +70,7 @@ def format_agent_notification_text(
         f"<b>Device:</b> {event.get('device_id', 'Unknown')}\n"
         f"<b>Event Type:</b> {event.get('event_type', 'Unknown')}\n\n"
         f"<b>Evidence:</b>\n{evidence_block}\n\n"
-        f"<b>Recommendation:</b>\n{mode_label} {investigation.recommendation}"
+        f"<b>Recommendation:</b>\n{rec_text}"
     )
     return text
 
@@ -191,11 +194,21 @@ def process_new_events(
     start_mono = time.monotonic()
     deadline_mono = start_mono + max_seconds
 
-    cursor_str = get_app_state(conn, "agent_event_cursor", default="0")
+    cursor_str = get_app_state(conn, "agent_event_cursor")
+    if cursor_str is None:
+        # First run guard: initialize cursor to current max rowid in events table to prevent walking past history
+        cur_max = conn.execute("SELECT MAX(rowid) FROM events").fetchone()
+        max_rowid = cur_max[0] if cur_max and cur_max[0] is not None else 0
+        set_app_state(conn, "agent_event_cursor", str(max_rowid))
+        logger.info("Initialized agent_event_cursor on first run to rowid %d", max_rowid)
+        return []
+
     try:
-        cursor = int(cursor_str or "0")
+        cursor = int(cursor_str)
     except ValueError:
         cursor = 0
+
+    max_event_age = int(cfg_dict.get("max_event_age_minutes", 120))
 
     cur = conn.execute(
         """
@@ -223,6 +236,30 @@ def process_new_events(
         event_key = event.get("external_id") or f"evt_{rowid}"
         event["event_key"] = event_key
 
+        # Guard against stale events older than max_event_age_minutes
+        occ_str = event.get("occurred_at")
+        if occ_str:
+            clean_occ = occ_str.replace("Z", "+00:00")
+            occ_dt = datetime.fromisoformat(clean_occ)
+            if occ_dt.tzinfo is None:
+                occ_dt = occ_dt.replace(tzinfo=timezone.utc)
+            age_seconds = (now_utc - occ_dt).total_seconds()
+            if age_seconds > max_event_age * 60:
+                logger.info(
+                    "Event %s exceeds max_event_age_minutes (%dm > %dm); skipping.",
+                    event_key,
+                    int(age_seconds / 60),
+                    max_event_age,
+                )
+                set_app_state(conn, "agent_event_cursor", str(rowid))
+                processed.append({
+                    "rowid": rowid,
+                    "event_key": event_key,
+                    "ambiguous": False,
+                    "skipped_reason": "stale_event",
+                })
+                continue
+
         try:
             reason = is_ambiguous_event(conn, event, now_utc, cfg=cfg_dict)
             if reason is not None:
@@ -243,6 +280,7 @@ def process_new_events(
                     if r_row["device_id"] == event.get("device_id"):
                         tz_name = r_row["timezone"]
                         break
+                event["timezone"] = tz_name
 
                 inv, gate_decision = run_investigation_and_gate(
                     conn=conn,

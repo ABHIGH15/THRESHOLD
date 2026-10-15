@@ -265,7 +265,7 @@ def run_daemon_command(args: argparse.Namespace) -> int:
 
     dashboard_enabled = not getattr(args, "no_dashboard", False)
     dashboard_port = getattr(args, "dashboard_port", 8080)
-    dashboard_host = getattr(args, "dashboard_host", "0.0.0.0")
+    dashboard_host = getattr(args, "dashboard_host", "127.0.0.1")
 
     config = DaemonConfig(
         db_path=args.db,
@@ -519,7 +519,7 @@ def main() -> int:
     dash_parser.add_argument("--config", "-c", default=None, help="Path to JSON config file (default: threshold.json)")
     dash_parser.add_argument("--db", default="threshold.db", help="Path to SQLite database (default: threshold.db)")
     dash_parser.add_argument("--port", "-p", type=int, default=8080, help="HTTP port to bind (default: 8080)")
-    dash_parser.add_argument("--host", default="0.0.0.0", help="HTTP host to bind (default: 0.0.0.0)")
+    dash_parser.add_argument("--host", default="127.0.0.1", help="HTTP host to bind (default: 127.0.0.1)")
     dash_parser.add_argument("--household", default=None, help="Household display name")
     dash_parser.add_argument("--timezone", default=None, help="Household timezone name")
     dash_parser.add_argument("--snapshot-dir", default="snapshots", help="Directory where snapshots are saved (default: snapshots)")
@@ -555,7 +555,7 @@ def main() -> int:
     run_parser.add_argument("--no-poll", action="store_true", help="Disable Ring API polling (scheduler only)")
     run_parser.add_argument("--no-dashboard", action="store_true", help="Disable embedded dashboard web server")
     run_parser.add_argument("--dashboard-port", type=int, default=8080, help="Web dashboard port (default: 8080)")
-    run_parser.add_argument("--dashboard-host", default="0.0.0.0", help="Web dashboard host (default: 0.0.0.0)")
+    run_parser.add_argument("--dashboard-host", default="127.0.0.1", help="Web dashboard host (default: 127.0.0.1)")
     run_parser.add_argument("--once", action="store_true", help="Execute single cycle and exit")
 
     args = parser.parse_args()

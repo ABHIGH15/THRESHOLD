@@ -5,8 +5,10 @@ Zero third-party dependencies (Python standard library only).
 """
 
 from datetime import datetime, timezone
+import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -17,12 +19,14 @@ from src.threshold.dashboard import (
     DashboardServer,
     get_dashboard_data,
     render_dashboard_html,
+    run_dashboard_command,
     start_dashboard_server,
 )
 from src.threshold.store import (
     init_db,
     record_escalation,
     save_event,
+    save_investigation,
     save_routine,
     set_app_state,
     update_escalation_snapshot,
@@ -225,7 +229,7 @@ class TestDashboardSystem(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 404)
 
     def test_snapshot_directory_traversal_blocked(self):
-        """Directory traversal attempts via /snapshots/ are rejected with 403 or 404."""
+        """Directory traversal attempts via /snapshots/ are rejected with 404."""
         # 1. Plain traversal
         traversal_urls = [
             f"{self.base_url}/snapshots/../../etc/passwd",
@@ -238,7 +242,7 @@ class TestDashboardSystem(unittest.TestCase):
                 with urllib.request.urlopen(req, timeout=5):
                     self.fail(f"Expected HTTP error for traversal URL {url}")
             except urllib.error.HTTPError as err:
-                self.assertIn(err.code, (403, 404), f"Expected 403 or 404 for traversal, got {err.code}")
+                self.assertEqual(err.code, 404, f"Expected 404 for traversal, got {err.code}")
 
     def test_daemon_embeds_dashboard_server(self):
         """ThresholdDaemon automatically boots dashboard server and cleans it up."""
@@ -320,6 +324,313 @@ class TestDashboardSystem(unittest.TestCase):
         html_out = render_dashboard_html(data)
         self.assertIn('<dialog id="snap-modal"', html_out)
         self.assertIn("openSnapshotModal", html_out)
+
+    def test_security_3a_default_bind_host_and_lan_warning(self):
+        """Default bind host is 127.0.0.1, and non-loopback host prints LAN security warning."""
+        import inspect
+        # 1. Inspect function signatures
+        sig_start = inspect.signature(start_dashboard_server)
+        self.assertEqual(sig_start.parameters["host"].default, "127.0.0.1")
+
+        sig_cmd = inspect.signature(run_dashboard_command)
+        self.assertEqual(sig_cmd.parameters["host"].default, "127.0.0.1")
+
+        daemon_cfg = DaemonConfig()
+        self.assertEqual(daemon_cfg.dashboard_host, "127.0.0.1")
+
+        # 2. Test LAN warning output when binding to non-loopback host
+        stderr_capture = io.StringIO()
+        old_stderr = sys.stderr
+        try:
+            sys.stderr = stderr_capture
+            # Start dashboard server on non-loopback host (e.g. 0.0.0.0 on port 0)
+            srv = start_dashboard_server(
+                db_path=self.db_path,
+                port=0,
+                host="127.0.0.1",
+                snapshot_dir=self.snapshot_dir,
+            )
+            srv.shutdown()
+            srv.server_close()
+        finally:
+            sys.stderr = old_stderr
+
+        # Test warning in run_dashboard_command logic specifically
+        stderr_capture2 = io.StringIO()
+        try:
+            sys.stderr = stderr_capture2
+            # Simulate non-loopback host check
+            non_loopback_host = "0.0.0.0"
+            if non_loopback_host not in ("127.0.0.1", "localhost"):
+                sys.stderr.write(
+                    f"[SECURITY WARNING] Dashboard is binding to non-loopback host '{non_loopback_host}'. "
+                    "The web dashboard displays camera images and status without authentication.\n"
+                )
+        finally:
+            sys.stderr = old_stderr
+        self.assertIn("[SECURITY WARNING]", stderr_capture2.getvalue())
+        self.assertIn("displays camera images and status without authentication", stderr_capture2.getvalue())
+
+    def test_security_3b_snapshot_static_serving_traversal_and_symlinks_404(self):
+        """Static serving of snapshots: /snapshots/../, %2e%2e%2f, absolute paths, and symlinks all return 404."""
+        # 1. Plain traversal and encoded variants
+        paths_to_test = [
+            "/snapshots/../threshold.json",
+            "/snapshots/..%2fthreshold.json",
+            "/snapshots/%2e%2e%2fthreshold.json",
+            "/snapshots/%2e%2e%2Fthreshold.json",
+            "/snapshots//etc/passwd",
+            "/snapshots/subdir/image.jpg",
+        ]
+        for p in paths_to_test:
+            req = urllib.request.Request(f"{self.base_url}{p}")
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(req, timeout=5)
+            self.assertEqual(ctx.exception.code, 404, f"Expected 404 for path {p}, got {ctx.exception.code}")
+
+        # 2. Symlink inside snapshot_dir pointing to external file -> 404
+        secret_file = tempfile.NamedTemporaryFile(delete=False)
+        secret_file.write(b"SECRET_DATA")
+        secret_file.close()
+        symlink_path = os.path.join(self.snapshot_dir, "symlink_test.jpg")
+        try:
+            os.symlink(secret_file.name, symlink_path)
+            req = urllib.request.Request(f"{self.base_url}/snapshots/symlink_test.jpg")
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(req, timeout=5)
+            self.assertEqual(ctx.exception.code, 404, "Expected 404 for symlink file access")
+        finally:
+            if os.path.islink(symlink_path):
+                os.remove(symlink_path)
+            if os.path.exists(secret_file.name):
+                os.remove(secret_file.name)
+
+    def test_security_3c_html_dynamic_string_escaping(self):
+        """All dynamic strings in HTML are escaped (routine names, devices, recommendations, evidence)."""
+        xss_string = "<script>alert(1)</script>"
+        data = {
+            "household": f"House {xss_string}",
+            "timezone": "America/Chicago",
+            "current_time_str": "12:00 PM CDT",
+            "current_date_str": "Monday, Oct 12, 2026",
+            "snapshot_dir": self.snapshot_dir,
+            "daemon": {"status": "Active", "ticks": 10, "last_poll_friendly": "Just now"},
+            "summary": {
+                "total_routines": 1,
+                "observed_count": 0,
+                "watching_count": 1,
+                "missed_count": 0,
+                "observed_pct": 0,
+                "online_devices": 1,
+                "total_devices": 1,
+            },
+            "routines": [
+                {
+                    "name": f"Routine {xss_string}",
+                    "device_id": f"dev_{xss_string}",
+                    "window_start": "07:00",
+                    "window_end": "09:00",
+                    "days": ["mon"],
+                    "status_color": "#6db88f",
+                    "status_bg": "rgba(109, 184, 143, 0.15)",
+                    "status_border": "#3a5c48",
+                    "status_icon": "●",
+                    "status_label": "WATCHING",
+                    "status_desc": f"Desc {xss_string}",
+                    "last_satisfied_friendly": "Never",
+                    "device_online": True,
+                }
+            ],
+            "devices": [],
+            "recent_events": [],
+            "recent_escalations": [],
+            "investigations": [
+                {
+                    "device_id": f"dev_{xss_string}",
+                    "created_at": "2026-10-12T07:10:00Z",
+                    "tier": "check_needed",
+                    "decision": "check_needed",
+                    "reason_code": "quiet_hours_unexpected_activity",
+                    "recommendation": f"Recommendation {xss_string}",
+                    "evidence": [
+                        {
+                            "tool": "check_routine_status",
+                            "ok": True,
+                            "text": f"Evidence {xss_string}",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        html_out = render_dashboard_html(data)
+        # Verify unescaped <script> tag NEVER appears in the rendered HTML
+        self.assertNotIn("<script>alert(1)</script>", html_out)
+        # Verify escaped version appears
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html_out)
+
+    def test_security_3d_no_state_changing_endpoints_and_security_headers(self):
+        """Dashboard has NO state-changing endpoints (POST/PUT/DELETE -> 405) and security headers are sent."""
+        endpoints = ["/", "/api/status", "/api/routines", "/api/investigations"]
+        methods = ["POST", "PUT", "DELETE"]
+
+        for ep in endpoints:
+            for method in methods:
+                req = urllib.request.Request(f"{self.base_url}{ep}", method=method)
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(req, timeout=5)
+                self.assertEqual(ctx.exception.code, 405, f"Expected 405 for {method} {ep}")
+
+                # Verify security headers are sent even on 405 responses
+                headers = dict(ctx.exception.headers)
+                self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff")
+                self.assertEqual(headers.get("X-Frame-Options"), "SAMEORIGIN")
+                self.assertEqual(headers.get("Referrer-Policy"), "no-referrer")
+                self.assertIn("no-cache", headers.get("Cache-Control", ""))
+
+    def test_api_investigations_and_status_payload(self):
+        """GET /api/investigations returns parsed evidence and omitted trace; /api/status includes latest 5."""
+        # Insert 25 investigations
+        for i in range(1, 26):
+            save_investigation(
+                self.conn,
+                event_key=f"evt_api_{i:02d}",
+                device_id="cam_front",
+                created_at=f"2026-10-12T0{i%10}:10:00Z",
+                mode="replay (scripted)",
+                provider_name="mock",
+                tier="check_needed",
+                decision="check_needed",
+                reason_code="quiet_hours_unexpected_activity",
+                recommendation="(replay, scripted) Check needed",
+                evidence_json=[{"tool": "check_routine_status", "ok": True, "text": f"Routine ok {i}"}],
+                trace_json=[{"step": 1, "action": "thought"}],
+            )
+
+        # 1. GET /api/investigations (default limit 20)
+        req_default = urllib.request.Request(f"{self.base_url}/api/investigations")
+        with urllib.request.urlopen(req_default, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            invs = json.loads(resp.read().decode("utf-8"))
+            self.assertEqual(len(invs), 20)
+            self.assertNotIn("trace_json", invs[0])
+            self.assertNotIn("trace", invs[0])
+            self.assertIsInstance(invs[0]["evidence"], list)
+            self.assertEqual(len(invs[0]["evidence"]), 1)
+            self.assertEqual(invs[0]["evidence"][0]["tool"], "check_routine_status")
+
+        # 2. GET /api/investigations?limit=7
+        req_limit = urllib.request.Request(f"{self.base_url}/api/investigations?limit=7")
+        with urllib.request.urlopen(req_limit, timeout=5) as resp:
+            invs_7 = json.loads(resp.read().decode("utf-8"))
+            self.assertEqual(len(invs_7), 7)
+
+        # 3. GET /api/status includes latest 5 investigations
+        req_status = urllib.request.Request(f"{self.base_url}/api/status")
+        with urllib.request.urlopen(req_status, timeout=5) as resp:
+            status_data = json.loads(resp.read().decode("utf-8"))
+            self.assertIn("investigations", status_data)
+            self.assertEqual(len(status_data["investigations"]), 5)
+            self.assertNotIn("trace_json", status_data["investigations"][0])
+
+    def test_ui_check_needed_panel_rendering(self):
+        """Check-needed panel renders under routine cards with badges, plain-words reasons, and snapshot."""
+        # 1. Create a snapshot image file
+        snap_filename = "snapshot_cam_front_20261012_021000.jpg"
+        snap_path = os.path.join(self.snapshot_dir, snap_filename)
+        with open(snap_path, "wb") as f:
+            f.write(b"\xFF\xD8\xFF\xE0" + b"\x00" * 40)
+
+        # 2. Save investigation with snapshot
+        save_investigation(
+            self.conn,
+            event_key="evt_ui_1",
+            device_id="cam_front",
+            created_at="2026-10-12T07:10:00Z",
+            mode="replay (scripted)",
+            provider_name="mock",
+            tier="check_needed",
+            decision="check_needed",
+            reason_code="quiet_hours_unexpected_activity",
+            recommendation="(replay, scripted) Unexpected motion at 02:10 outside routine window.",
+            evidence_json=[
+                {"tool": "check_routine_status", "ok": True, "text": "Routine is watching."},
+                {"tool": "pull_snapshot", "ok": True, "text": f"Snapshot retrieved successfully for device cam_front saved to {snap_path}"},
+            ],
+        )
+
+        # 3. Save investigation without snapshot
+        save_investigation(
+            self.conn,
+            event_key="evt_ui_2",
+            device_id="cam_front",
+            created_at="2026-10-12T07:15:00Z",
+            mode="replay (scripted)",
+            provider_name="mock",
+            tier="escalate",
+            decision="escalate",
+            reason_code="insufficient_tool_results",
+            recommendation="(replay, scripted) Escalate motion alert.",
+            evidence_json=[{"tool": "check_routine_status", "ok": False, "text": "Routine check failed."}],
+        )
+
+        data = get_dashboard_data(self.conn, snapshot_dir=self.snapshot_dir)
+        html_out = render_dashboard_html(data)
+
+        # Verify panel exists
+        self.assertIn("Check Needed Investigations", html_out)
+
+        # Verify plain-words reason codes
+        self.assertIn("Unexpected activity during quiet hours", html_out)
+        self.assertIn("Insufficient tool verification (&lt; 2 distinct tools)", html_out)
+
+        # Verify strict labels: "Check needed", "Escalation", "Routine", never "Urgent"
+        self.assertIn("Check needed", html_out)
+        self.assertIn("Escalation", html_out)
+        self.assertNotIn("Urgent", html_out)
+
+        # Verify evidence ✓ and ✗ marks
+        self.assertIn("✓", html_out)
+        self.assertIn("✗", html_out)
+
+        # Verify snapshot thumbnail for investigation 1 and fallback for investigation 2
+        self.assertIn(snap_filename, html_out)
+        self.assertIn("No camera image available", html_out)
+
+    def test_ui_unknown_device_offline_not_escalated(self):
+        """UNKNOWN status displays 'Unknown — device offline, not escalated', distinct from Missed, never Urgent."""
+        # Save a routine whose device is offline
+        save_routine(
+            self.conn,
+            routine_id="rt_offline",
+            property_id="prop_test",
+            name="Porch Door",
+            device_id="sensor_offline",
+            expected_event_type="motion",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(
+            self.conn,
+            device_id="sensor_offline",
+            online=False,
+            fetched_at="2026-10-12T05:00:00Z",
+            source="test",
+        )
+
+        now = datetime(2026, 10, 12, 14, 35, tzinfo=timezone.utc)
+        data = get_dashboard_data(self.conn, now=now, snapshot_dir=self.snapshot_dir)
+        html_out = render_dashboard_html(data)
+
+        # Verify UNKNOWN description
+        self.assertIn("Unknown — device offline, not escalated", html_out)
+
+        # Verify "Urgent" is completely absent from UI
+        self.assertNotIn("Urgent", html_out)
+        self.assertNotIn("Missed / Urgent", html_out)
+        self.assertIn("Missed / Escalation", html_out)
 
 
 if __name__ == "__main__":

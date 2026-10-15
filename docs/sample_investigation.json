@@ -13,7 +13,7 @@
     "steps": 5,
     "elapsed_ms": 0,
     "tier": "escalate",
-    "recommendation": "Unexpected motion at 02:10 outside routine window. Routine status is watching. Snapshot attached for the caregiver to review.",
+    "recommendation": "(replay, scripted) Unexpected motion at 02:10 outside routine window. Routine status is watching. Snapshot attached for the caregiver to review.",
     "fallback": false
   },
   "steps": [
@@ -52,7 +52,7 @@
     {
       "type": "final",
       "tier": "escalate",
-      "recommendation": "Unexpected motion at 02:10 outside routine window. Routine status is watching. Snapshot attached for the caregiver to review.",
+      "recommendation": "Unexpected motion at {local_time} outside routine window. Routine status is watching. Snapshot attached for the caregiver to review.",
       "cited_call_ids": [
         "call_1",
         "call_2"

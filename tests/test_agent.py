@@ -823,6 +823,7 @@ class TestAgentLibrary(unittest.TestCase):
         notifier = RecordingNotifier()
         now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
 
+        set_app_state(self.conn, "agent_event_cursor", "0")
         fake_client = FakeRingClient("success")
         processed = process_new_events(
             conn=self.conn,
@@ -857,6 +858,7 @@ class TestAgentLibrary(unittest.TestCase):
 
     def test_runner_error_isolation_and_fallback(self):
         """Runner catches per-event exceptions, saves fallback record, and advances cursor."""
+        set_app_state(self.conn, "agent_event_cursor", "0")
         save_routine(
             self.conn,
             routine_id="rt_day",
@@ -901,6 +903,7 @@ class TestAgentLibrary(unittest.TestCase):
 
     def test_daemon_tick_with_agent_enabled_and_disabled(self):
         """ThresholdDaemon executes agent processing on ticks when enabled, ignores when disabled."""
+        set_app_state(self.conn, "agent_event_cursor", "0")
         save_routine(
             self.conn,
             routine_id="rt_day",
@@ -930,6 +933,303 @@ class TestAgentLibrary(unittest.TestCase):
         res_en = daemon_en.tick_once()
         self.assertEqual(len(res_en.get("agent_processed", [])), 1)
         self.assertTrue(res_en["agent_processed"][0]["ambiguous"])
+
+    def test_first_run_guard_initializes_cursor_without_backfill(self):
+        """With agent_event_cursor unset and 500 old events, initializes cursor to max rowid without backfill."""
+        # Ensure cursor is unset
+        self.assertIsNone(get_app_state(self.conn, "agent_event_cursor"))
+
+        # Insert 500 events
+        for i in range(1, 501):
+            save_event(
+                self.conn,
+                "webhook",
+                f"evt_bulk_{i}",
+                "cam_front",
+                "motion_detected",
+                "2026-10-12T02:10:00Z",
+                "2026-10-12T02:10:00Z",
+                {},
+            )
+
+        agent_cfg = AgentConfig(enabled=True)
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+        notifier = RecordingNotifier()
+
+        # First run: should initialize cursor to 500 and process 0 events
+        processed = process_new_events(
+            conn=self.conn,
+            provider_factory=lambda: MockProvider("trace_escalate_two_tools.json"),
+            now=now,
+            cfg=agent_cfg,
+            notifier=notifier,
+        )
+        self.assertEqual(len(processed), 0)
+        self.assertEqual(get_app_state(self.conn, "agent_event_cursor"), "500")
+        self.assertEqual(len(notifier.sent), 0)
+        self.assertEqual(len(list_investigations(self.conn)), 0)
+
+        # Subsequent event arrival: 501st event should now be processed
+        save_routine(
+            self.conn,
+            routine_id="rt_day",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+        save_event(
+            self.conn,
+            "webhook",
+            "evt_bulk_501",
+            "cam_front",
+            "motion_detected",
+            "2026-10-12T07:10:00Z",
+            "2026-10-12T07:10:00Z",
+            {},
+        )
+        processed2 = process_new_events(
+            conn=self.conn,
+            provider_factory=lambda: MockProvider("trace_escalate_two_tools.json"),
+            now=now,
+            cfg=agent_cfg,
+            notifier=notifier,
+        )
+        self.assertEqual(len(processed2), 1)
+        self.assertEqual(get_app_state(self.conn, "agent_event_cursor"), "501")
+
+    def test_stale_event_guard_skips_investigation_and_advances_cursor(self):
+        """Events older than max_event_age_minutes (120m) are skipped and advance cursor."""
+        set_app_state(self.conn, "agent_event_cursor", "0")
+        save_routine(
+            self.conn,
+            routine_id="rt_day",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+
+        # Event occurred at 05:00 UTC (180 min before now 08:00 UTC > 120 min max_age)
+        save_event(
+            self.conn,
+            "webhook",
+            "evt_stale_1",
+            "cam_front",
+            "motion_detected",
+            "2026-10-12T05:00:00Z",
+            "2026-10-12T05:00:00Z",
+            {},
+        )
+
+        agent_cfg = AgentConfig(enabled=True, max_event_age_minutes=120)
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+        notifier = RecordingNotifier()
+
+        processed = process_new_events(
+            conn=self.conn,
+            provider_factory=lambda: MockProvider("trace_escalate_two_tools.json"),
+            now=now,
+            cfg=agent_cfg,
+            notifier=notifier,
+        )
+        self.assertEqual(len(processed), 1)
+        self.assertEqual(processed[0]["skipped_reason"], "stale_event")
+        self.assertFalse(processed[0]["ambiguous"])
+        self.assertEqual(get_app_state(self.conn, "agent_event_cursor"), "1")
+        self.assertIsNone(get_investigation(self.conn, "evt_stale_1"))
+        self.assertEqual(len(notifier.sent), 0)
+
+    def test_scripted_recommendation_placeholder_with_0340(self):
+        """Event at 03:40 local produces text containing 03:40 and never 02:10."""
+        # 08:40 UTC in America/Chicago (CDT, UTC-5) is 03:40 CDT
+        event = {
+            "event_key": "evt_test_0340",
+            "device_id": "cam_front",
+            "event_type": "motion_detected",
+            "occurred_at": "2026-10-12T08:40:00Z",
+            "timezone": "America/Chicago",
+        }
+        provider = MockProvider("trace_escalate_two_tools.json")
+        inv = investigate(self.conn, provider=provider, event=event)
+        self.assertIn("03:40", inv.recommendation)
+        self.assertNotIn("02:10", inv.recommendation)
+
+    def test_mock_provider_recommendation_always_prefixed_replay_scripted(self):
+        """Mock provider recommendations are always prefixed with (replay, scripted)."""
+        event = {
+            "event_key": "evt_test_prefix",
+            "device_id": "cam_front",
+            "event_type": "motion_detected",
+            "occurred_at": "2026-10-12T07:10:00Z",
+            "timezone": "America/Chicago",
+        }
+        provider = MockProvider("trace_escalate_two_tools.json")
+        inv = investigate(self.conn, provider=provider, event=event)
+        self.assertTrue(inv.recommendation.startswith("(replay, scripted)"))
+
+        # Notification text also maintains (replay, scripted) without duplication
+        notif_text = format_agent_notification_text(event, inv)
+        self.assertIn("(replay, scripted)", notif_text)
+        self.assertNotIn("(replay, scripted) (replay, scripted)", notif_text)
+
+    def test_notify_off_does_not_send_notification(self):
+        """When notify_enabled=False, no notification is sent even on escalate."""
+        set_app_state(self.conn, "agent_event_cursor", "0")
+        save_routine(
+            self.conn,
+            routine_id="rt_day",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+        save_event(self.conn, "webhook", "evt_off", "cam_front", "motion_detected", "2026-10-12T07:10:00Z", "2026-10-12T07:10:00Z", {})
+
+        agent_cfg = AgentConfig(enabled=True, notify_enabled=False)
+        notifier = RecordingNotifier()
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+
+        processed = process_new_events(
+            conn=self.conn,
+            provider_factory=lambda: MockProvider("trace_escalate_two_tools.json"),
+            now=now,
+            cfg=agent_cfg,
+            notifier=notifier,
+            ring_client=FakeRingClient("success"),
+        )
+        self.assertEqual(len(processed), 1)
+        self.assertEqual(processed[0]["decision"], "escalate")
+        self.assertFalse(processed[0]["notified"])
+        self.assertEqual(len(notifier.sent), 0)
+
+    def test_notify_check_needed_does_not_send_notification(self):
+        """When gate decision is check_needed, no notification is sent even with notify_enabled=True."""
+        set_app_state(self.conn, "agent_event_cursor", "0")
+        save_routine(
+            self.conn,
+            routine_id="rt_day",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+        save_event(self.conn, "webhook", "evt_cn", "cam_front", "motion_detected", "2026-10-12T07:10:00Z", "2026-10-12T07:10:00Z", {})
+
+        agent_cfg = AgentConfig(enabled=True, notify_enabled=True)
+        notifier = RecordingNotifier()
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+
+        # trace_escalate_one_tool produces check_needed decision
+        processed = process_new_events(
+            conn=self.conn,
+            provider_factory=lambda: MockProvider("trace_escalate_one_tool.json"),
+            now=now,
+            cfg=agent_cfg,
+            notifier=notifier,
+            ring_client=FakeRingClient("success"),
+        )
+        self.assertEqual(len(processed), 1)
+        self.assertEqual(processed[0]["decision"], "check_needed")
+        self.assertFalse(processed[0]["notified"])
+        self.assertEqual(len(notifier.sent), 0)
+
+    def test_stalled_provider_does_not_block_absence_tick(self):
+        """A stalled or failing agent provider does not block the absence scheduler tick."""
+        set_app_state(self.conn, "agent_event_cursor", "0")
+        # Missed routine: window 07:00-09:00 + 30m grace = 09:30 deadline. Current time is 09:35.
+        save_routine(
+            self.conn,
+            routine_id="rt_missed",
+            property_id="prop_1",
+            name="Morning Meds",
+            device_id="cam_front",
+            expected_event_type="motion",
+            window_start="07:00",
+            window_end="09:00",
+            escalation_delay_minutes=30,
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T14:00:00Z", "webhook")
+        save_event(self.conn, "webhook", "evt_stall", "cam_front", "motion", "2026-10-12T07:10:00Z", "2026-10-12T07:10:00Z", {})
+
+        class ExplodingProvider:
+            name = "exploding"
+            mode = "agent"
+            def next_step(self, *args, **kwargs):
+                raise RuntimeError("Stalled provider failure")
+
+        cfg = DaemonConfig(
+            agent=AgentConfig(enabled=True, max_seconds_per_tick=1.0),
+        )
+        now_dt = datetime(2026, 10, 12, 14, 35, tzinfo=timezone.utc)  # 09:35 CDT
+        notifier = RecordingNotifier()
+        daemon = ThresholdDaemon(
+            config=cfg,
+            conn=self.conn,
+            clock=FakeClock(now_dt),
+            notifier=notifier,
+            provider_factory=lambda: ExplodingProvider(),
+        )
+
+        res = daemon.tick_once()
+        # Absence routine was still evaluated and escalated!
+        self.assertEqual(res.get("new_escalations", 0), 1)
+        self.assertEqual(res["statuses"].get("rt_missed"), "missed")
+
+    def test_cursor_advance_on_non_ambiguous_events(self):
+        """Cursor advances across non-ambiguous events without calling provider."""
+        set_app_state(self.conn, "agent_event_cursor", "0")
+        save_routine(
+            self.conn,
+            routine_id="rt_day",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+
+        # 3 daytime events inside routine window (12:30 UTC = 07:30 CDT)
+        for i in range(1, 4):
+            save_event(self.conn, "webhook", f"evt_norm_{i}", "cam_front", "motion", "2026-10-12T12:30:00Z", "2026-10-12T12:30:00Z", {})
+
+        agent_cfg = AgentConfig(enabled=True)
+        now = datetime(2026, 10, 12, 13, 0, tzinfo=timezone.utc)
+        processed = process_new_events(
+            conn=self.conn,
+            provider_factory=lambda: MockProvider("trace_escalate_two_tools.json"),
+            now=now,
+            cfg=agent_cfg,
+        )
+        self.assertEqual(len(processed), 3)
+        self.assertFalse(any(p["ambiguous"] for p in processed))
+        self.assertEqual(get_app_state(self.conn, "agent_event_cursor"), "3")
 
     # --- 8. Import Guard (AST-Based) ---
 

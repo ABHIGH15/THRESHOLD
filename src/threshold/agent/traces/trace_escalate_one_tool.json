@@ -1,6 +1,6 @@
 {
   "provenance": "scripted",
-  "scenario": "Unexpected camera motion at 02:10 local, outside every routine window.",
+  "scenario": "Unexpected camera motion at {local_time} local, outside every routine window.",
   "description": "Trace 2: Escalate tier with only 1 successful tool result (routine check only).",
   "steps": [
     {
@@ -12,7 +12,7 @@
     {
       "type": "final",
       "tier": "escalate",
-      "recommendation": "Unexpected motion at 02:10 outside routine window. Routine status verified as watching.",
+      "recommendation": "Unexpected motion at {local_time} outside routine window. Routine status verified as watching.",
       "cited_call_ids": ["call_1"]
     }
   ]

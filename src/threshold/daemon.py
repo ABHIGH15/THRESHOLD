@@ -45,7 +45,7 @@ class DaemonConfig:
     enable_polling: bool = True
     dashboard_enabled: bool = True
     dashboard_port: int = 8080
-    dashboard_host: str = "0.0.0.0"
+    dashboard_host: str = "127.0.0.1"
     snapshot_dir: str = "snapshots"
     agent: Optional[Any] = None
 
@@ -367,6 +367,18 @@ class ThresholdDaemon:
         if self.config.dashboard_enabled and not self.dashboard_server:
             try:
                 from src.threshold.dashboard import start_dashboard_server
+
+                if self.config.dashboard_host not in ("127.0.0.1", "localhost"):
+                    logger.warning(
+                        "[SECURITY WARNING] Dashboard is binding to non-loopback host '%s'. "
+                        "The web dashboard displays camera images and status without authentication.",
+                        self.config.dashboard_host,
+                    )
+                    print(
+                        f"[SECURITY WARNING] Dashboard is binding to non-loopback host '{self.config.dashboard_host}'. "
+                        "The web dashboard displays camera images and status without authentication.",
+                        file=sys.stderr,
+                    )
 
                 self.dashboard_server = start_dashboard_server(
                     db_path=self.config.db_path,

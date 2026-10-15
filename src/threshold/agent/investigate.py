@@ -174,6 +174,20 @@ def investigate(
             tier = final_output.tier
 
         recommendation = _clean_recommendation(final_output.recommendation)
+        if "{local_time}" in recommendation:
+            occ_str = event.get("occurred_at")
+            local_time_val = "02:10"
+            if occ_str:
+                try:
+                    clean_occ = occ_str.replace("Z", "+00:00")
+                    from zoneinfo import ZoneInfo
+                    occ_dt = datetime.fromisoformat(clean_occ)
+                    tz_name = event.get("timezone", "America/Chicago")
+                    local_dt = occ_dt.astimezone(ZoneInfo(tz_name))
+                    local_time_val = local_dt.strftime("%H:%M")
+                except Exception:
+                    pass
+            recommendation = recommendation.replace("{local_time}", local_time_val)
 
         # DERIVE evidence strictly from tool results cited by the model
         evidence: List[Evidence] = []
@@ -198,6 +212,12 @@ def investigate(
 
     mode = getattr(provider, "mode", "agent")
     provider_name = getattr(provider, "name", "unknown")
+
+    # Enforce "(replay, scripted)" prefix for mock/replay mode across all consumers
+    if mode == "replay (scripted)" or provider_name in ("mock", "mock_provider"):
+        prefix = "(replay, scripted)"
+        if not recommendation.startswith(prefix):
+            recommendation = f"{prefix} {recommendation}"
 
     return Investigation(
         event_key=event["event_key"],
