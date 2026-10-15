@@ -22,7 +22,7 @@ import tempfile
 import threading
 import unittest
 
-from src.threshold.models import Routine
+from src.threshold.models import DeviceHealthRecord, Routine
 from src.threshold.notifier import (
     ConsoleNotifier,
     Notifier,
@@ -30,8 +30,12 @@ from src.threshold.notifier import (
     TelegramNotifier,
     detect_image_mime,
     encode_multipart_form_data,
+    format_escalation_text,
+    format_fired_at,
+    format_last_activity,
     make_callback_data,
     redact_telegram_token,
+    resolve_callback_routine_id,
     truncate_caption,
 )
 from src.threshold.ring_client import MediaUnavailable
@@ -1222,6 +1226,200 @@ class TestNotifierSystem(unittest.TestCase):
         self.assertIsNotNone(corr_row)
         self.assertEqual(corr_row["device_id"], "sensor_cabinet_long")
         self.assertEqual(corr_row["label"], "false_alarm")
+
+        conn.close()
+
+    def test_missed_routine_alert_never_has_last_activity_equal_to_fired_at(self):
+        """For a missed routine with no events, Last Activity displays window context and never equals fired_at or health poll timestamp."""
+        routine = Routine(
+            property_id="prop_test",
+            name="Morning Medicine",
+            device_id="sensor_medicine_cabinet",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone="America/Chicago",
+            days=["mon", "tue", "wed", "thu", "fri"],
+            escalation_delay_minutes=30,
+        )
+        # Device health ping timestamp occurred at 14:31:00 UTC (09:31 CDT)
+        health_poll_dt = datetime(2026, 10, 12, 14, 31, 0, tzinfo=timezone.utc)
+        device_health = DeviceHealthRecord(
+            device_id="sensor_medicine_cabinet",
+            last_event_at=health_poll_dt,
+        )
+
+        fired_at_iso = "2026-10-12T14:31:00Z"
+        alert_text = format_escalation_text(routine, fired_at_iso, device_health)
+
+        # 1. Fired at must be formatted in routine's local timezone
+        self.assertIn("Fired at: 09:31 CDT (2026-10-12)", alert_text)
+
+        # 2. Last Activity must clearly state absence in window, NOT the health ping time or fired_at
+        self.assertIn("Last Activity: None recorded in window (07:00-09:00 CDT)", alert_text)
+        self.assertNotIn("Last Activity: 2026-10-12 14:31:00 UTC", alert_text)
+        self.assertNotIn("Last Activity: 09:31", alert_text)
+
+        # 3. Last Activity must strictly not equal fired_at or health_poll_dt
+        last_act = format_last_activity(routine, device_health)
+        fired_str = format_fired_at(fired_at_iso, routine.timezone)
+        self.assertNotEqual(last_act, fired_str)
+        self.assertEqual(last_act, "None recorded in window (07:00-09:00 CDT)")
+
+    def test_bogus_callback_hash_acks_nothing(self):
+        """An unresolvable or bogus callback hash mutates nothing in SQLite, logs a warning, and answers with inactive notice."""
+        conn = get_connection(self.db_path)
+        routine_id = "rt_valid_morning"
+        save_routine(
+            conn=conn,
+            routine_id=routine_id,
+            property_id="prop_valid",
+            name="Valid Morning",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon", "tue", "wed", "thu", "fri"],
+            escalation_delay_minutes=30,
+        )
+        local_date = "2026-10-12"
+        record_escalation(
+            conn=conn,
+            routine_id=routine_id,
+            local_date=local_date,
+            fired_at="2026-10-12T14:31:00Z",
+            notified_at="2026-10-12T14:31:05Z",
+        )
+
+        notifier = TelegramNotifier(
+            bot_token="test_tok",
+            chat_id="5551234",
+            base_url=self.base_url,
+        )
+
+        # Bogus hash callback query
+        bogus_data = f"fa:deadbeefcafebabe:{local_date}"
+        self.server.queued_updates = [
+            {
+                "update_id": 902,
+                "callback_query": {
+                    "id": "cb_bogus_1",
+                    "from": {"id": 5551234, "is_bot": False, "first_name": "Sarah"},
+                    "message": {"message_id": 101, "chat": {"id": 5551234}},
+                    "data": bogus_data,
+                },
+            }
+        ]
+
+        processed = notifier.poll_and_process_callbacks(conn)
+
+        # Nothing processed
+        self.assertEqual(len(processed), 0)
+
+        # Escalation in DB remains untouched and unacknowledged
+        cur = conn.execute("SELECT acked_at FROM escalations WHERE routine_id = ?", (routine_id,))
+        row = cur.fetchone()
+        self.assertIsNotNone(row)
+        self.assertIsNone(row["acked_at"])
+
+        # Zero corrections recorded
+        self.assertEqual(len(list_corrections(conn)), 0)
+
+        # Callback query answered with alert inactive message
+        self.assertTrue(any(
+            ans.get("callback_query_id") == "cb_bogus_1" and ans.get("text") == "This alert is no longer active."
+            for ans in self.server.answered_callbacks
+        ))
+
+        conn.close()
+
+    def test_bogus_callback_with_two_unacked_escalations_acks_neither(self):
+        """When multiple unacknowledged escalations exist, a bogus callback does not fall back to or mutate either escalation."""
+        conn = get_connection(self.db_path)
+        r1_id = "rt_medicine_box"
+        r2_id = "rt_front_door"
+
+        save_routine(
+            conn=conn,
+            routine_id=r1_id,
+            property_id="prop_mult",
+            name="Medicine Box",
+            device_id="sensor_med",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="08:00",
+            timezone_name="America/Chicago",
+            days=["mon", "tue", "wed", "thu", "fri"],
+            escalation_delay_minutes=30,
+        )
+        save_routine(
+            conn=conn,
+            routine_id=r2_id,
+            property_id="prop_mult",
+            name="Front Door",
+            device_id="cam_door",
+            expected_event_type="motion_detected",
+            window_start="08:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon", "tue", "wed", "thu", "fri"],
+            escalation_delay_minutes=30,
+        )
+
+        local_date = "2026-10-12"
+        record_escalation(
+            conn=conn,
+            routine_id=r1_id,
+            local_date=local_date,
+            fired_at="2026-10-12T13:31:00Z",
+            notified_at="2026-10-12T13:31:05Z",
+        )
+        record_escalation(
+            conn=conn,
+            routine_id=r2_id,
+            local_date=local_date,
+            fired_at="2026-10-12T14:31:00Z",
+            notified_at="2026-10-12T14:31:05Z",
+        )
+
+        notifier = TelegramNotifier(
+            bot_token="test_tok",
+            chat_id="5551234",
+            base_url=self.base_url,
+        )
+
+        bogus_data = f"ak:0123456789abcdef:{local_date}"
+        self.server.queued_updates = [
+            {
+                "update_id": 903,
+                "callback_query": {
+                    "id": "cb_bogus_2",
+                    "from": {"id": 5551234, "is_bot": False, "first_name": "Sarah"},
+                    "message": {"message_id": 102, "chat": {"id": 5551234}},
+                    "data": bogus_data,
+                },
+            }
+        ]
+
+        processed = notifier.poll_and_process_callbacks(conn)
+        self.assertEqual(len(processed), 0)
+
+        # Neither escalation is acknowledged
+        cur1 = conn.execute("SELECT acked_at FROM escalations WHERE routine_id = ?", (r1_id,))
+        self.assertIsNone(cur1.fetchone()["acked_at"])
+
+        cur2 = conn.execute("SELECT acked_at FROM escalations WHERE routine_id = ?", (r2_id,))
+        self.assertIsNone(cur2.fetchone()["acked_at"])
+
+        # No corrections
+        self.assertEqual(len(list_corrections(conn)), 0)
+
+        # Callback answered
+        self.assertTrue(any(
+            ans.get("callback_query_id") == "cb_bogus_2" and ans.get("text") == "This alert is no longer active."
+            for ans in self.server.answered_callbacks
+        ))
 
         conn.close()
 

@@ -26,7 +26,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from src.threshold.dashboard import start_dashboard_server, DashboardServer
+from src.threshold.dashboard import get_dashboard_data, start_dashboard_server, DashboardServer
 from src.threshold.ingest import ingest_event
 from src.threshold.models import DeviceHealthRecord, Routine
 from src.threshold.notifier import (
@@ -196,10 +196,11 @@ def print_header() -> None:
     print("  Does not contact emergency services.")
     print("  SIMULATED EVENTS. Times are simulated. The camera image is a real image from the")
     print("  Ring Partner API sandbox.")
-    print("-" * 86)
-    print("  Dallas, TX  |  Resident: Margaret (Age 82, living independently)")
+    print("  Simulated household (fictional): Dallas, TX  |  Resident: Margaret (Age 82)")
     print("  Hardware:   Ring Motion Sensor (Medicine Cabinet) + Playground Device (Camera)")
     print("              Ring Contact Sensor (Front Door)       + Ring Doorbell Cam (Porch)")
+    print("  Note:       Device types shown are illustrative; only the camera image is from a")
+    print("              real Ring sandbox device.")
     print("  Stack:      Python Standard Library only + SQLite + Telegram + Ring Partner API")
     print("  Cloud:      Runs on your own machine; no Threshold-operated cloud.")
     print("              Data goes only to Ring (the source) and Telegram (alerts).")
@@ -471,7 +472,10 @@ def run_demo(
 
     print_timeline_row("12:30 UTC", "07:30 CDT", st_med_1, st_door_1, "0 active", "Front door motion detected (Margaret got paper)")
     print("     ↳ Front Door Walk satisfied -> 🟢 OBSERVED. Medicine cabinet window is open -> 🟡 WATCHING.")
-    print("     ↳ Dashboard shows 100% routines observed today, 1 routine satisfied, 1 routine watching.")
+    c_dash1 = get_connection(target_db)
+    sum1 = get_dashboard_data(c_dash1, now=clock.now())["summary"]
+    c_dash1.close()
+    print(f"     ↳ Dashboard shows {sum1['observed_pct']}% routines observed today ({sum1['observed_count']} of {sum1['total_routines']} completed, {sum1['watching_count']} watching).")
 
     pace_pause(1.5)
     prompt_step("Beat 1 complete. Margaret has completed her front door walk.")

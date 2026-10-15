@@ -69,24 +69,65 @@ def format_health_state(routine: Routine, device_health: Optional[Any] = None) -
     return f"Online / Healthy ({routine.device_id})"
 
 
+def format_fired_at(fired_at: Union[str, datetime], timezone_name: str) -> str:
+    """Format fired_at timestamp in routine's local timezone, e.g. '09:31 CDT (2026-10-12)'."""
+    try:
+        from zoneinfo import ZoneInfo
+        if isinstance(fired_at, str):
+            clean_str = fired_at.replace("Z", "+00:00").replace(" UTC", "+00:00")
+            dt = datetime.fromisoformat(clean_str)
+        else:
+            dt = fired_at
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        tz = ZoneInfo(timezone_name)
+        dt_local = dt.astimezone(tz)
+        return dt_local.strftime("%H:%M %Z (%Y-%m-%d)")
+    except Exception:
+        return str(fired_at)
+
+
 def format_last_activity(routine: Routine, device_health: Optional[Any] = None) -> str:
-    """Format last recorded activity timestamp."""
+    """
+    Format last recorded activity timestamp in routine's local timezone.
+    For a routine with no qualifying event in its window:
+    'None recorded in window (07:00-09:00 CDT)'
+    """
+    from zoneinfo import ZoneInfo
+    try:
+        tz = ZoneInfo(routine.timezone)
+        now_local = datetime.now(timezone.utc).astimezone(tz)
+        tz_abbr = now_local.strftime("%Z")
+    except Exception:
+        tz_abbr = routine.timezone
+
+    window_str = f"None recorded in window ({routine.window_start}-{routine.window_end} {tz_abbr})"
+
+    # If routine has an actual satisfied activity, format it in the routine's local timezone
     if routine.last_satisfied_at:
-        return routine.last_satisfied_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-    if device_health and hasattr(device_health, "last_event_at") and device_health.last_event_at:
-        return device_health.last_event_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-    return "None recorded within window"
+        try:
+            tz = ZoneInfo(routine.timezone)
+            sat_dt = routine.last_satisfied_at
+            if sat_dt.tzinfo is None:
+                sat_dt = sat_dt.replace(tzinfo=timezone.utc)
+            sat_local = sat_dt.astimezone(tz)
+            return sat_local.strftime("%H:%M %Z (%Y-%m-%d)")
+        except Exception:
+            return routine.last_satisfied_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    return window_str
 
 
 def format_escalation_text(
     routine: Routine,
-    fired_at: str,
+    fired_at: Union[str, datetime],
     device_health: Optional[Any] = None,
 ) -> str:
     """Format Telegram alert message text for an escalation."""
     expected_by = format_expected_by(routine)
     health_state = format_health_state(routine, device_health)
     last_act = format_last_activity(routine, device_health)
+    fired_str = format_fired_at(fired_at, routine.timezone)
 
     return (
         f"🚨 <b>THRESHOLD ESCALATION</b>\n\n"
@@ -94,7 +135,7 @@ def format_escalation_text(
         f"Expected by: {expected_by}\n"
         f"Device State: {health_state}\n"
         f"Last Activity: {last_act}\n"
-        f"Fired at: {fired_at}\n\n"
+        f"Fired at: {fired_str}\n\n"
         f"<i>Please note: this is an automated message notification, not a phone call.</i>"
     )
 
@@ -102,25 +143,14 @@ def format_escalation_text(
 def resolve_callback_routine_id(
     conn: sqlite3.Connection,
     candidate_id: Optional[str],
-    local_date: Optional[str],
 ) -> Optional[str]:
     """
-    Resolve callback routine_id, handling direct match, SHA256 prefix hash, or fallback.
+    Resolve callback routine_id via exact match in routines or 16-character SHA256 prefix hash.
+    Strictly returns None if the routine cannot be resolved by exact ID or hash match.
+    Zero fallback to active/unacknowledged escalations.
     """
     if not candidate_id:
-        if local_date:
-            cur = conn.execute(
-                "SELECT routine_id FROM escalations WHERE local_date = ? AND acked_at IS NULL ORDER BY fired_at DESC LIMIT 1",
-                (local_date,),
-            )
-            row = cur.fetchone()
-            if row:
-                return row["routine_id"]
-        cur = conn.execute(
-            "SELECT routine_id FROM escalations WHERE acked_at IS NULL ORDER BY fired_at DESC LIMIT 1"
-        )
-        row = cur.fetchone()
-        return row["routine_id"] if row else None
+        return None
 
     # 1. Direct match in routines table
     if get_routine(conn, candidate_id) is not None:
@@ -134,28 +164,14 @@ def resolve_callback_routine_id(
             if hashlib.sha256(real_id.encode("utf-8")).hexdigest()[:16] == candidate_id:
                 return real_id
 
-        # Also check escalations in case routine was modified or deleted
+        # Also check distinct routine_ids in escalations table
         cur = conn.execute("SELECT DISTINCT routine_id FROM escalations")
         for row in cur.fetchall():
             real_id = row["routine_id"]
             if hashlib.sha256(real_id.encode("utf-8")).hexdigest()[:16] == candidate_id:
                 return real_id
 
-    # 3. Fallback to unacknowledged escalation for local_date or overall
-    if local_date:
-        cur = conn.execute(
-            "SELECT routine_id FROM escalations WHERE local_date = ? AND acked_at IS NULL ORDER BY fired_at DESC LIMIT 1",
-            (local_date,),
-        )
-        row = cur.fetchone()
-        if row:
-            return row["routine_id"]
-
-    cur = conn.execute(
-        "SELECT routine_id FROM escalations WHERE acked_at IS NULL ORDER BY fired_at DESC LIMIT 1"
-    )
-    row = cur.fetchone()
-    return row["routine_id"] if row else None
+    return None
 
 
 def make_callback_data(prefix: str, routine_id: str, local_date: str) -> str:
@@ -840,7 +856,17 @@ class TelegramNotifier(Notifier):
                     parts = cb_data.split(":", 2)
                     if len(parts) >= 3:
                         cand_routine_id, local_date = parts[1], parts[2]
-                routine_id = resolve_callback_routine_id(conn, cand_routine_id, local_date)
+                routine_id = resolve_callback_routine_id(conn, cand_routine_id)
+                if not routine_id:
+                    logger.warning(
+                        "Unresolvable callback routine '%s' (data: '%s'): alert is no longer active",
+                        cand_routine_id,
+                        cb_data,
+                    )
+                    if cb_id:
+                        self.answer_callback_query(cb_id, text="This alert is no longer active.")
+                    continue
+
                 if not local_date and routine_id:
                     cur = conn.execute(
                         "SELECT local_date FROM escalations WHERE routine_id = ? AND acked_at IS NULL ORDER BY fired_at DESC LIMIT 1",
@@ -887,7 +913,17 @@ class TelegramNotifier(Notifier):
                     parts = cb_data.split(":", 2)
                     if len(parts) >= 3:
                         cand_routine_id, local_date = parts[1], parts[2]
-                routine_id = resolve_callback_routine_id(conn, cand_routine_id, local_date)
+                routine_id = resolve_callback_routine_id(conn, cand_routine_id)
+                if not routine_id:
+                    logger.warning(
+                        "Unresolvable callback routine '%s' (data: '%s'): alert is no longer active",
+                        cand_routine_id,
+                        cb_data,
+                    )
+                    if cb_id:
+                        self.answer_callback_query(cb_id, text="This alert is no longer active.")
+                    continue
+
                 if not local_date and routine_id:
                     cur = conn.execute(
                         "SELECT local_date FROM escalations WHERE routine_id = ? AND acked_at IS NULL ORDER BY fired_at DESC LIMIT 1",
