@@ -18,7 +18,7 @@
     {
       "type": "final",
       "tier": "escalate",
-      "recommendation": "Unexpected motion at 02:10 outside routine window. Verified routine watching and camera snapshot confirmed.",
+      "recommendation": "Unexpected motion at 02:10 outside routine window. Routine status is watching. Snapshot attached for the caregiver to review.",
       "cited_call_ids": ["call_1", "call_2"]
     }
   ]

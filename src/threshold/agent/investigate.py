@@ -244,8 +244,8 @@ def run_investigation_and_gate(
         limits=limits,
     )
 
-    # Count successful tool results from derived evidence
-    ok_tool_results = sum(1 for e in investigation.evidence if e.ok)
+    # Count distinct successful tools from derived evidence (same tool twice counts once)
+    ok_tool_results = len({e.tool for e in investigation.evidence if e.ok})
 
     facts = build_gate_facts(conn=conn, device_id=event["device_id"], now=now)
     gate_decision = decide(

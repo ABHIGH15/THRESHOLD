@@ -17,6 +17,7 @@ import tempfile
 import unittest
 
 from src.threshold.config import (
+    AgentConfig,
     RoutineConfig,
     ThresholdConfig,
     find_config_file,
@@ -304,7 +305,61 @@ class TestThresholdConfig(unittest.TestCase):
                 content = f.read()
             self.assertIn("Mom's House", content)
 
+    def test_agent_config_defaults(self):
+        """ThresholdConfig parses agent defaults cleanly."""
+        data = {
+            "household": "Test House",
+            "timezone": "America/Chicago",
+            "routines": [],
+        }
+        cfg = load_config_from_dict(data)
+        self.assertIsNotNone(cfg.agent)
+        self.assertFalse(cfg.agent.enabled)
+        self.assertEqual(cfg.agent.provider, "mock")
+        self.assertEqual(cfg.agent.quiet_hours, ["23:00", "05:00"])
+        self.assertEqual(cfg.agent.dedupe_minutes, 30)
+        self.assertEqual(cfg.agent.max_per_tick, 3)
+
+    def test_agent_config_validation_rules(self):
+        """validate_config enforces strict agent configuration rules when enabled."""
+        base_data = {
+            "household": "Test House",
+            "timezone": "America/Chicago",
+            "routines": [],
+        }
+
+        # 1. Quiet hours length != 2
+        bad_qh = dict(base_data, agent={"enabled": True, "quiet_hours": ["23:00"]})
+        with self.assertRaises(ValueError) as ctx:
+            load_config_from_dict(bad_qh)
+        self.assertIn("quiet_hours", str(ctx.exception))
+
+        # 2. Quiet hours invalid time format
+        bad_time = dict(base_data, agent={"enabled": True, "quiet_hours": ["25:00", "05:00"]})
+        with self.assertRaises(ValueError) as ctx:
+            load_config_from_dict(bad_time)
+        self.assertIn("quiet_hours", str(ctx.exception))
+
+        # 3. Unknown provider
+        bad_prov = dict(base_data, agent={"enabled": True, "provider": "llama"})
+        with self.assertRaises(ValueError) as ctx:
+            load_config_from_dict(bad_prov)
+        self.assertIn("Unknown agent provider", str(ctx.exception))
+
+        # 4. Unimplemented provider
+        unimp_prov = dict(base_data, agent={"enabled": True, "provider": "anthropic"})
+        with self.assertRaises(ValueError) as ctx:
+            load_config_from_dict(unimp_prov)
+        self.assertIn("not implemented yet", str(ctx.exception))
+
+        # 5. Invalid max_per_tick
+        bad_tick = dict(base_data, agent={"enabled": True, "max_per_tick": 0})
+        with self.assertRaises(ValueError) as ctx:
+            load_config_from_dict(bad_tick)
+        self.assertIn("max_per_tick", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

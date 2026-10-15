@@ -47,6 +47,7 @@ class DaemonConfig:
     dashboard_port: int = 8080
     dashboard_host: str = "0.0.0.0"
     snapshot_dir: str = "snapshots"
+    agent: Optional[Any] = None
 
 
 def read_env_value(key: str, filepath: str = ".env") -> Optional[str]:
@@ -97,9 +98,11 @@ class ThresholdDaemon:
         notifier: Optional[Notifier] = None,
         conn: Optional[sqlite3.Connection] = None,
         clock: Optional[Clock] = None,
+        provider_factory: Optional[Union[Any, Any]] = None,
     ):
         self.config = config or DaemonConfig()
         self.clock = clock or RealClock()
+        self.provider_factory = provider_factory
         self._owns_conn = False
 
         if conn is not None:
@@ -171,9 +174,14 @@ class ThresholdDaemon:
                 more_msg = f"(+{len(routines) - 4} more routines)"
                 banner_lines.append(f"║              {more_msg:<47}║")
 
+        agent_str = "disabled"
+        if self.config.agent and getattr(self.config.agent, "enabled", False):
+            agent_str = f"enabled ({getattr(self.config.agent, 'provider', 'mock')})"
+
         banner_lines.extend([
             f"║  Polling:    {poll_str:<15} | Ticking: {tick_str:<18}║",
             f"║  Notifier:   {notifier_type:<47}║",
+            f"║  Agent:      {agent_str:<47}║",
         ])
 
         if self.config.dashboard_enabled:
@@ -205,6 +213,30 @@ class ThresholdDaemon:
         except Exception:
             pass
 
+        # Agent processing of newly ingested events
+        agent_processed = []
+        if self.config.agent and getattr(self.config.agent, "enabled", False):
+            try:
+                from src.threshold.agent.runner import process_new_events
+
+                agent_processed = process_new_events(
+                    conn=self.conn,
+                    provider_factory=self.provider_factory,
+                    now=now,
+                    cfg=self.config.agent,
+                    notifier=self.notifier,
+                    ring_client=self.ring_client,
+                )
+                if agent_processed:
+                    ambiguous_count = sum(1 for p in agent_processed if p.get("ambiguous"))
+                    esc_count = sum(1 for p in agent_processed if p.get("decision") == "escalate")
+                    if ambiguous_count > 0:
+                        print(f"[AGENT] 🔍 {ambiguous_count} event(s) investigated (escalate: {esc_count})")
+            except Exception as e:
+                logger.error("[ERROR] Exception in agent processing tick: %s", e, exc_info=True)
+                print(f"[ERROR] Exception in agent processing tick (continuing): {e}", file=sys.stderr)
+
+        res["agent_processed"] = agent_processed
         return res
 
     def poll_once(self, now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:

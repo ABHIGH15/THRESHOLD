@@ -1,0 +1,24 @@
+{
+  "provenance": "scripted",
+  "scenario": "Unexpected camera motion at 02:10 local, but household memory shows >= 3 past false alarms for this device and time bucket.",
+  "description": "Trace 4: Quieting noise safely - past false alarms lead to check_needed with no escalation push.",
+  "steps": [
+    {
+      "type": "call",
+      "tool": "check_household_memory",
+      "args": {
+        "device_id": "cam_front",
+        "event_type": "motion_detected"
+      },
+      "call_id": "call_1"
+    },
+    {
+      "type": "final",
+      "tier": "check_needed",
+      "recommendation": "Motion detected at 02:10, but household memory shows repeated past false alarms at this hour. Marked check needed without notification.",
+      "cited_call_ids": [
+        "call_1"
+      ]
+    }
+  ]
+}

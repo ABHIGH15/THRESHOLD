@@ -34,5 +34,15 @@
       "escalation_delay_minutes": 30,
       "snapshot_device_id": "ava1.ring.device.EXAMPLE_FRONT_DOORBELL"
     }
-  ]
+  ],
+  "agent": {
+    "enabled": false,
+    "provider": "mock",
+    "trace_file": "trace_escalate_two_tools.json",
+    "quiet_hours": ["23:00", "05:00"],
+    "dedupe_minutes": 30,
+    "max_per_tick": 3,
+    "notify_enabled": false,
+    "max_seconds_per_tick": 25.0
+  }
 }

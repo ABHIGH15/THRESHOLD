@@ -69,6 +69,33 @@ class RoutineConfig:
 
 
 @dataclass
+class AgentConfig:
+    """Agent subsystem configuration."""
+
+    enabled: bool = False
+    provider: str = "mock"
+    trace_file: str = "trace_escalate_two_tools.json"
+    quiet_hours: List[str] = field(default_factory=lambda: ["23:00", "05:00"])
+    dedupe_minutes: int = 30
+    max_per_tick: int = 3
+    notify_enabled: bool = False
+    max_seconds_per_tick: float = 25.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary representation."""
+        return {
+            "enabled": self.enabled,
+            "provider": self.provider,
+            "trace_file": self.trace_file,
+            "quiet_hours": self.quiet_hours,
+            "dedupe_minutes": self.dedupe_minutes,
+            "max_per_tick": self.max_per_tick,
+            "notify_enabled": self.notify_enabled,
+            "max_seconds_per_tick": self.max_seconds_per_tick,
+        }
+
+
+@dataclass
 class ThresholdConfig:
     """Top-level configuration for a Threshold household instance."""
 
@@ -81,6 +108,7 @@ class ThresholdConfig:
     snapshot_lookback_hours: int = 24
     snapshot_deadline_seconds: float = 5.0
     routines: List[RoutineConfig] = field(default_factory=list)
+    agent: AgentConfig = field(default_factory=AgentConfig)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to serializable dictionary."""
@@ -94,6 +122,7 @@ class ThresholdConfig:
             "snapshot_lookback_hours": self.snapshot_lookback_hours,
             "snapshot_deadline_seconds": self.snapshot_deadline_seconds,
             "routines": [r.to_dict() for r in self.routines],
+            "agent": self.agent.to_dict(),
         }
 
 
@@ -158,6 +187,21 @@ def validate_config(config: ThresholdConfig) -> List[str]:
             if d_lower not in VALID_DAYS:
                 raise ValueError(f"Routine '{r.id}': Invalid day '{d}'. Must be one of: {sorted(list(VALID_DAYS))}")
 
+    # Agent validation
+    if config.agent and config.agent.enabled:
+        if len(config.agent.quiet_hours) != 2:
+            raise ValueError("Config error: agent 'quiet_hours' must contain exactly two HH:MM time strings [start, end]")
+        validate_time_format(config.agent.quiet_hours[0], "agent quiet_hours start")
+        validate_time_format(config.agent.quiet_hours[1], "agent quiet_hours end")
+        if config.agent.provider not in ("mock", "anthropic", "openai"):
+            raise ValueError(f"Config error: Unknown agent provider '{config.agent.provider}'. Must be one of: 'mock', 'anthropic', 'openai'")
+        if config.agent.provider in ("anthropic", "openai"):
+            raise ValueError(f"Provider '{config.agent.provider}' not implemented yet")
+        if config.agent.max_per_tick <= 0:
+            raise ValueError("Config error: agent 'max_per_tick' must be positive")
+        if config.agent.max_seconds_per_tick <= 0:
+            raise ValueError("Config error: agent 'max_seconds_per_tick' must be positive")
+
     return warnings
 
 
@@ -203,6 +247,21 @@ def load_config_from_dict(raw_data: Dict[str, Any]) -> ThresholdConfig:
     except (ValueError, TypeError):
         snapshot_deadline = 5.0
 
+    agent_data = data.get("agent", {})
+    if isinstance(agent_data, dict):
+        agent_cfg = AgentConfig(
+            enabled=bool(agent_data.get("enabled", False)),
+            provider=str(agent_data.get("provider", "mock")),
+            trace_file=str(agent_data.get("trace_file", "trace_escalate_two_tools.json")),
+            quiet_hours=list(agent_data.get("quiet_hours", ["23:00", "05:00"])),
+            dedupe_minutes=int(agent_data.get("dedupe_minutes", 30)),
+            max_per_tick=int(agent_data.get("max_per_tick", 3)),
+            notify_enabled=bool(agent_data.get("notify_enabled", False)),
+            max_seconds_per_tick=float(agent_data.get("max_seconds_per_tick", 25.0)),
+        )
+    else:
+        agent_cfg = AgentConfig()
+
     config = ThresholdConfig(
         household=str(data.get("household", "Threshold Household")).strip(),
         timezone=str(data.get("timezone", "America/Chicago")).strip(),
@@ -213,6 +272,7 @@ def load_config_from_dict(raw_data: Dict[str, Any]) -> ThresholdConfig:
         snapshot_lookback_hours=snapshot_lookback,
         snapshot_deadline_seconds=snapshot_deadline,
         routines=routines,
+        agent=agent_cfg,
     )
 
     validate_config(config)

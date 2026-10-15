@@ -34,8 +34,15 @@ from src.threshold.agent.tools import (
     get_threshold_history,
     pull_snapshot,
 )
+from src.threshold.agent.runner import format_agent_notification_text, process_new_events
+from src.threshold.agent.triggers import is_ambiguous_event
+from src.threshold.config import AgentConfig
+from src.threshold.daemon import DaemonConfig, ThresholdDaemon
+from src.threshold.notifier import RecordingNotifier
 from src.threshold.ring_client import MediaUnavailable, RateLimited, TokenExpired
+from src.threshold.scheduler import FakeClock
 from src.threshold.store import (
+    get_app_state,
     get_investigation,
     init_db,
     list_investigations,
@@ -44,6 +51,7 @@ from src.threshold.store import (
     save_event,
     save_investigation,
     save_routine,
+    set_app_state,
     upsert_device_health,
 )
 
@@ -113,6 +121,7 @@ class TestAgentLibrary(unittest.TestCase):
             received_at="2026-10-12T11:30:00Z",
             raw_json={"test": 1},
         )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
 
         # Success case
         res = get_recent_ring_events(self.conn, now, {"device_id": "cam_front", "hours": 24, "limit": 10})
@@ -138,6 +147,7 @@ class TestAgentLibrary(unittest.TestCase):
     def test_tool_pull_snapshot_success_and_media_unavailable_and_bad_args(self):
         """pull_snapshot handles success, media errors, and bad args."""
         now = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
 
         # Success with injected client
         client_ok = FakeRingClient("success")
@@ -239,6 +249,7 @@ class TestAgentLibrary(unittest.TestCase):
     def test_tool_check_household_memory_success_and_bad_args(self):
         """check_household_memory counts false alarms accurately."""
         now = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
         record_correction(
             self.conn,
             id="corr_1",
@@ -579,7 +590,348 @@ class TestAgentLibrary(unittest.TestCase):
         inv_list = list_investigations(self.conn, device_id="cam_front")
         self.assertEqual(len(inv_list), 1)
 
-    # --- 7. Import Guard (AST-Based) ---
+    # --- 7. A8a Tests (Distinct Tools, Traversal, Trace 4, Triggers, Runner, Daemon) ---
+
+    def test_distinct_tools_counted_for_ok_tool_results(self):
+        """Calling the same tool twice only counts as 1 distinct tool result."""
+        save_routine(
+            self.conn,
+            routine_id="rt_morning",
+            property_id="prop_1",
+            name="Morning Door",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+
+        # Trace where same tool check_routine_status is called twice with different args
+        trace = {
+            "provenance": "scripted",
+            "scenario": "Duplicate tool call test",
+            "steps": [
+                {"type": "call", "tool": "check_routine_status", "args": {"routine_id": "rt_morning"}, "call_id": "call_1"},
+                {"type": "call", "tool": "check_routine_status", "args": {"device_id": "cam_front"}, "call_id": "call_2"},
+                {"type": "final", "tier": "escalate", "recommendation": "Escalate please", "cited_call_ids": ["call_1", "call_2"]},
+            ],
+        }
+        provider = MockProvider(trace)
+        now = datetime(2026, 10, 12, 7, 10, tzinfo=timezone.utc)
+        event = {
+            "event_key": "evt_dup_tool",
+            "device_id": "cam_front",
+            "event_type": "motion_detected",
+            "occurred_at": "2026-10-12T07:10:00Z",
+        }
+        inv, dec = run_investigation_and_gate(
+            conn=self.conn,
+            event=event,
+            provider=provider,
+            now=now,
+        )
+        self.assertEqual(inv.tier, "escalate")
+        self.assertEqual(len(inv.evidence), 2)
+        # Even though 2 evidence items, they come from the SAME tool ("check_routine_status")
+        # Gate must reject as insufficient_evidence
+        self.assertEqual(dec.decision, "check_needed")
+        self.assertEqual(dec.reason_code, "insufficient_evidence")
+
+    def test_path_traversal_and_device_validation_in_tools(self):
+        """Tools reject path traversal attacks and unknown device IDs."""
+        now = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
+        client = FakeRingClient("success")
+
+        # Path traversal in pull_snapshot device_id
+        res_traversal = pull_snapshot(
+            self.conn,
+            now,
+            {"device_id": "../../etc/passwd"},
+            ring_client=client,
+            snapshots_dir=self.temp_snapshots.name,
+        )
+        self.assertFalse(res_traversal.ok)
+        self.assertEqual(res_traversal.error, "invalid_args")
+
+        # Unknown device not in DB
+        res_unknown = pull_snapshot(
+            self.conn,
+            now,
+            {"device_id": "unknown_sensor_123"},
+            ring_client=client,
+            snapshots_dir=self.temp_snapshots.name,
+        )
+        self.assertFalse(res_unknown.ok)
+        self.assertEqual(res_unknown.error, "invalid_args")
+
+        # Path traversal in get_recent_ring_events
+        res_events = get_recent_ring_events(
+            self.conn,
+            now,
+            {"device_id": "../sensitive_file"},
+        )
+        self.assertFalse(res_events.ok)
+        self.assertEqual(res_events.error, "invalid_args")
+
+        # Verify nothing was written outside temp_snapshots
+        self.assertEqual(len(os.listdir(self.temp_snapshots.name)), 0)
+
+    def test_full_investigation_trace_4_household_memory_false_alarms(self):
+        """Trace 4: 3 past false alarms in household memory result in check_needed."""
+        save_routine(
+            self.conn,
+            routine_id="rt_morning",
+            property_id="prop_1",
+            name="Morning Door",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+
+        # Record 3 false alarms in corrections table
+        for i in range(3):
+            record_correction(
+                self.conn,
+                id=f"corr_{i+1}",
+                device_id="cam_front",
+                event_type="motion_detected",
+                time_bucket="2026-10-10",
+                label="false_alarm",
+                created_at=f"2026-10-10T1{i}:00:00Z",
+            )
+
+        now = datetime(2026, 10, 12, 7, 10, tzinfo=timezone.utc)
+        event = {
+            "event_key": "evt_trace_4",
+            "device_id": "cam_front",
+            "event_type": "motion_detected",
+            "sub_type": "human",
+            "occurred_at": "2026-10-12T07:10:00Z",
+        }
+        provider = MockProvider("trace_household_memory_false_alarms.json")
+        inv, dec = run_investigation_and_gate(
+            conn=self.conn,
+            event=event,
+            provider=provider,
+            now=now,
+        )
+        self.assertEqual(inv.tier, "check_needed")
+        self.assertEqual(dec.decision, "check_needed")
+        self.assertEqual(dec.reason_code, "check_needed")
+        self.assertIn("repeated past false alarms", inv.recommendation)
+
+    def test_triggers_unexpected_activity(self):
+        """is_ambiguous_event correctly identifies quiet hours unexpected activity and dedupes."""
+        save_routine(
+            self.conn,
+            routine_id="rt_day",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+        )
+
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+
+        # 1. Inside routine window (07:30 CDT = 12:30 UTC):
+        event_in_window = {
+            "event_type": "motion_detected",
+            "device_id": "cam_front",
+            "occurred_at": "2026-10-12T12:30:00Z",
+        }
+        self.assertIsNone(is_ambiguous_event(self.conn, event_in_window, now))
+
+        # 2. Daytime outside routine window (14:00 CDT = 19:00 UTC):
+        event_daytime = {
+            "event_type": "motion_detected",
+            "device_id": "cam_front",
+            "occurred_at": "2026-10-12T19:00:00Z",
+        }
+        self.assertIsNone(is_ambiguous_event(self.conn, event_daytime, now))
+
+        # 3. Device with no routines:
+        event_unknown = {
+            "event_type": "motion_detected",
+            "device_id": "sensor_unknown",
+            "occurred_at": "2026-10-12T07:10:00Z",
+        }
+        self.assertIsNone(is_ambiguous_event(self.conn, event_unknown, now))
+
+        # 4. Quiet hours unexpected activity (02:10 CDT = 07:10 UTC):
+        event_quiet = {
+            "event_type": "motion_detected",
+            "device_id": "cam_front",
+            "occurred_at": "2026-10-12T07:10:00Z",
+        }
+        reason = is_ambiguous_event(self.conn, event_quiet, now)
+        self.assertEqual(reason, "quiet_hours_unexpected_activity")
+
+        # 5. Deduplication: save an investigation row for cam_front within 30 min
+        save_investigation(
+            self.conn,
+            event_key="evt_prev",
+            device_id="cam_front",
+            created_at=now,
+            mode="agent",
+            provider_name="mock",
+            tier="check_needed",
+            decision="check_needed",
+            reason_code="quiet_hours_unexpected_activity",
+        )
+        self.assertIsNone(is_ambiguous_event(self.conn, event_quiet, now))
+
+    def test_runner_process_new_events_and_cursor(self):
+        """process_new_events advances cursor, investigates ambiguous events, and notifies."""
+        save_routine(
+            self.conn,
+            routine_id="rt_day",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+
+        # Insert 3 events
+        # Event 1: normal daytime routine window (07:30 CDT = 12:30 UTC) -> not ambiguous
+        save_event(self.conn, "webhook", "evt_1", "cam_front", "motion_detected", "2026-10-12T12:30:00Z", "2026-10-12T12:30:00Z", {})
+        # Event 2: quiet hours unexpected activity (02:10 CDT = 07:10 UTC) -> ambiguous
+        save_event(self.conn, "webhook", "evt_2", "cam_front", "motion_detected", "2026-10-12T07:10:00Z", "2026-10-12T07:10:00Z", {})
+        # Event 3: daytime outside window (14:00 CDT = 19:00 UTC) -> not ambiguous
+        save_event(self.conn, "webhook", "evt_3", "cam_front", "motion_detected", "2026-10-12T19:00:00Z", "2026-10-12T19:00:00Z", {})
+
+        agent_cfg = AgentConfig(
+            enabled=True,
+            provider="mock",
+            trace_file="trace_escalate_two_tools.json",
+            notify_enabled=True,
+        )
+        notifier = RecordingNotifier()
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+
+        fake_client = FakeRingClient("success")
+        processed = process_new_events(
+            conn=self.conn,
+            provider_factory=lambda: MockProvider("trace_escalate_two_tools.json"),
+            now=now,
+            cfg=agent_cfg,
+            notifier=notifier,
+            ring_client=fake_client,
+        )
+
+        self.assertEqual(len(processed), 3)
+        self.assertFalse(processed[0]["ambiguous"])
+        self.assertTrue(processed[1]["ambiguous"])
+        self.assertEqual(processed[1]["decision"], "escalate")
+        self.assertTrue(processed[1]["notified"])
+        self.assertFalse(processed[2]["ambiguous"])
+
+        # Check that cursor advanced to 3 in app_state
+        cursor_val = get_app_state(self.conn, "agent_event_cursor")
+        self.assertEqual(cursor_val, "3")
+
+        # Check investigation was saved
+        inv = get_investigation(self.conn, "evt_2")
+        self.assertIsNotNone(inv)
+        self.assertEqual(inv["decision"], "escalate")
+        self.assertIsNotNone(inv["notified_at"])
+
+        # Check notifier received message
+        self.assertEqual(len(notifier.sent), 1)
+        sent_msg = notifier.sent[0]
+        self.assertIn("CHECK NEEDED", sent_msg["text"])
+
+    def test_runner_error_isolation_and_fallback(self):
+        """Runner catches per-event exceptions, saves fallback record, and advances cursor."""
+        save_routine(
+            self.conn,
+            routine_id="rt_day",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+        save_event(self.conn, "webhook", "evt_err", "cam_front", "motion_detected", "2026-10-12T07:10:00Z", "2026-10-12T07:10:00Z", {})
+
+        agent_cfg = AgentConfig(enabled=True)
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+
+        # Provider factory that raises an unhandled exception
+        def bad_factory():
+            raise RuntimeError("Catastrophic provider explosion")
+
+        processed = process_new_events(
+            conn=self.conn,
+            provider_factory=bad_factory,
+            now=now,
+            cfg=agent_cfg,
+        )
+        self.assertEqual(len(processed), 1)
+        self.assertIn("error", processed[0])
+
+        # Verify cursor still advanced so queue does not stall
+        cursor_val = get_app_state(self.conn, "agent_event_cursor")
+        self.assertEqual(cursor_val, "1")
+
+        # Verify fallback investigation saved
+        inv = get_investigation(self.conn, "evt_err")
+        self.assertIsNotNone(inv)
+        self.assertEqual(inv["mode"], "fallback")
+        self.assertEqual(inv["tier"], "check_needed")
+        self.assertEqual(inv["reason_code"], "error")
+
+    def test_daemon_tick_with_agent_enabled_and_disabled(self):
+        """ThresholdDaemon executes agent processing on ticks when enabled, ignores when disabled."""
+        save_routine(
+            self.conn,
+            routine_id="rt_day",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+
+        # Add an event
+        save_event(self.conn, "webhook", "evt_d1", "cam_front", "motion", "2026-10-12T07:10:00Z", "2026-10-12T07:10:00Z", {})
+
+        # Disabled case
+        cfg_disabled = DaemonConfig(agent=AgentConfig(enabled=False))
+        daemon_dis = ThresholdDaemon(config=cfg_disabled, conn=self.conn, clock=FakeClock(datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)))
+        res_dis = daemon_dis.tick_once()
+        self.assertEqual(len(res_dis.get("agent_processed", [])), 0)
+
+        # Enabled case
+        cfg_enabled = DaemonConfig(agent=AgentConfig(enabled=True, trace_file="trace_escalate_two_tools.json"))
+        daemon_en = ThresholdDaemon(config=cfg_enabled, conn=self.conn, clock=FakeClock(datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)))
+        res_en = daemon_en.tick_once()
+        self.assertEqual(len(res_en.get("agent_processed", [])), 1)
+        self.assertTrue(res_en["agent_processed"][0]["ambiguous"])
+
+    # --- 8. Import Guard (AST-Based) ---
 
     def test_ast_import_guard(self):
         """

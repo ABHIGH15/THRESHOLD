@@ -21,6 +21,35 @@ from src.threshold.ring_client import (
 from src.threshold.scheduler import build_device_health_record
 from src.threshold.status import derive_status
 from src.threshold.store import get_routine, list_routines, row_to_routine, to_iso_timestamp
+import re
+
+DEVICE_ID_REGEX = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
+IDENTIFIER_REGEX = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
+
+
+def _is_known_valid_device_id(conn: Optional[sqlite3.Connection], device_id: Any) -> bool:
+    """
+    Validate that device_id matches ^[A-Za-z0-9._:-]{1,200}$ and is present
+    in routines or device_health table if database connection is available.
+    """
+    if not isinstance(device_id, str) or not DEVICE_ID_REGEX.match(device_id):
+        return False
+    if conn is not None:
+        try:
+            cur = conn.execute(
+                """
+                SELECT 1 FROM routines WHERE device_id = ?
+                UNION
+                SELECT 1 FROM device_health WHERE device_id = ?
+                LIMIT 1
+                """,
+                (device_id, device_id),
+            )
+            if not cur.fetchone():
+                return False
+        except Exception:
+            return False
+    return True
 
 
 def _validate_whitelist_args(args: Dict[str, Any], allowed_keys: set) -> bool:
@@ -51,13 +80,13 @@ def get_recent_ring_events(
         )
 
     device_id = args.get("device_id")
-    if not device_id or not isinstance(device_id, str):
+    if not _is_known_valid_device_id(conn, device_id):
         return ToolResult(
             call_id=call_id,
             tool="get_recent_ring_events",
             ok=False,
             data=None,
-            text="Invalid arguments: device_id is required and must be a string.",
+            text="Invalid arguments: invalid or unknown device_id.",
             error="invalid_args",
         )
 
@@ -143,13 +172,13 @@ def pull_snapshot(
         )
 
     device_id = args.get("device_id")
-    if not device_id or not isinstance(device_id, str):
+    if not _is_known_valid_device_id(conn, device_id):
         return ToolResult(
             call_id=call_id,
             tool="pull_snapshot",
             ok=False,
             data=None,
-            text="Invalid arguments: device_id is required and must be a string.",
+            text="Invalid arguments: invalid or unknown device_id.",
             error="invalid_args",
         )
 
@@ -181,7 +210,22 @@ def pull_snapshot(
 
         os.makedirs(snapshots_dir, exist_ok=True)
         ts_str = now.strftime("%Y%m%d_%H%M%S")
-        file_path = os.path.join(snapshots_dir, f"snapshot_{device_id}_{ts_str}.jpg")
+        sanitized_device = re.sub(r"[^A-Za-z0-9._-]", "_", device_id)
+        sanitized_device = os.path.basename(sanitized_device)
+        file_path = os.path.join(snapshots_dir, f"snapshot_{sanitized_device}_{ts_str}.jpg")
+
+        abs_dest = os.path.abspath(file_path)
+        abs_dir = os.path.abspath(snapshots_dir)
+        if not abs_dest.startswith(abs_dir + os.sep) and abs_dest != abs_dir:
+            return ToolResult(
+                call_id=call_id,
+                tool="pull_snapshot",
+                ok=False,
+                data=None,
+                text="Invalid arguments: path traversal attempt detected.",
+                error="invalid_args",
+            )
+
         with open(file_path, "wb") as f:
             f.write(image_bytes)
 
@@ -286,6 +330,26 @@ def check_routine_status(
             error="invalid_args",
         )
 
+    if device_id is not None and not _is_known_valid_device_id(conn, device_id):
+        return ToolResult(
+            call_id=call_id,
+            tool="check_routine_status",
+            ok=False,
+            data=None,
+            text="Invalid arguments: invalid or unknown device_id.",
+            error="invalid_args",
+        )
+
+    if routine_id is not None and (not isinstance(routine_id, str) or not IDENTIFIER_REGEX.match(routine_id)):
+        return ToolResult(
+            call_id=call_id,
+            tool="check_routine_status",
+            ok=False,
+            data=None,
+            text="Invalid arguments: invalid routine_id format.",
+            error="invalid_args",
+        )
+
     routines_to_check: List[Routine] = []
     if routine_id:
         r_row = get_routine(conn, routine_id)
@@ -372,6 +436,26 @@ def get_threshold_history(
             error="invalid_args",
         )
 
+    if device_id is not None and not _is_known_valid_device_id(conn, device_id):
+        return ToolResult(
+            call_id=call_id,
+            tool="get_threshold_history",
+            ok=False,
+            data=None,
+            text="Invalid arguments: invalid or unknown device_id.",
+            error="invalid_args",
+        )
+
+    if routine_id is not None and (not isinstance(routine_id, str) or not IDENTIFIER_REGEX.match(routine_id)):
+        return ToolResult(
+            call_id=call_id,
+            tool="get_threshold_history",
+            ok=False,
+            data=None,
+            text="Invalid arguments: invalid routine_id format.",
+            error="invalid_args",
+        )
+
     days = args.get("days", 30)
     if not isinstance(days, int) or days < 1 or days > 30:
         return ToolResult(
@@ -447,23 +531,23 @@ def check_household_memory(
 
     device_id = args.get("device_id")
     event_type = args.get("event_type")
-    if not device_id or not isinstance(device_id, str):
+    if not _is_known_valid_device_id(conn, device_id):
         return ToolResult(
             call_id=call_id,
             tool="check_household_memory",
             ok=False,
             data=None,
-            text="Invalid arguments: device_id is required and must be a string.",
+            text="Invalid arguments: invalid or unknown device_id.",
             error="invalid_args",
         )
 
-    if not event_type or not isinstance(event_type, str):
+    if not isinstance(event_type, str) or not IDENTIFIER_REGEX.match(event_type):
         return ToolResult(
             call_id=call_id,
             tool="check_household_memory",
             ok=False,
             data=None,
-            text="Invalid arguments: event_type is required and must be a string.",
+            text="Invalid arguments: invalid event_type format.",
             error="invalid_args",
         )
 

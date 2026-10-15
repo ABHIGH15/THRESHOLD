@@ -278,6 +278,7 @@ def run_daemon_command(args: argparse.Namespace) -> int:
         dashboard_enabled=dashboard_enabled,
         dashboard_port=dashboard_port,
         dashboard_host=dashboard_host,
+        agent=cfg.agent if cfg else None,
     )
 
     daemon = ThresholdDaemon(
