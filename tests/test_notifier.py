@@ -1335,6 +1335,53 @@ class TestNotifierSystem(unittest.TestCase):
 
         conn.close()
 
+    def test_callback_for_valid_routine_without_escalation_writes_nothing(self):
+        """A callback for a VALID routine whose local_date has NO escalation row writes nothing and answers 'This alert is no longer active.'"""
+        conn = get_connection(self.db_path)
+        routine_id = "rt_valid_morning"
+        save_routine(
+            conn=conn,
+            routine_id=routine_id,
+            property_id="prop_valid",
+            name="Valid Morning",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon", "tue", "wed", "thu", "fri"],
+            escalation_delay_minutes=30,
+        )
+        local_date = "2026-10-15"
+
+        notifier = TelegramNotifier(
+            bot_token="test_tok",
+            chat_id="5551234",
+            base_url=self.base_url,
+        )
+
+        cb_data = f"fa:{routine_id}:{local_date}"
+        self.server.queued_updates = [
+            {
+                "update_id": 905,
+                "callback_query": {
+                    "id": "cb_no_esc_1",
+                    "from": {"id": 5551234, "is_bot": False, "first_name": "Sarah"},
+                    "message": {"message_id": 105, "chat": {"id": 5551234}},
+                    "data": cb_data,
+                },
+            }
+        ]
+
+        processed = notifier.poll_and_process_callbacks(conn)
+        self.assertEqual(len(processed), 0)
+        self.assertEqual(len(list_corrections(conn)), 0)
+        self.assertTrue(any(
+            ans.get("callback_query_id") == "cb_no_esc_1" and ans.get("text") == "This alert is no longer active."
+            for ans in self.server.answered_callbacks
+        ))
+        conn.close()
+
     def test_bogus_callback_with_two_unacked_escalations_acks_neither(self):
         """When multiple unacknowledged escalations exist, a bogus callback does not fall back to or mutate either escalation."""
         conn = get_connection(self.db_path)

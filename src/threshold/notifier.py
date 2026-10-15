@@ -947,6 +947,20 @@ class TelegramNotifier(Notifier):
                     local_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
                 if routine_id and local_date:
+                    cur_esc = conn.execute(
+                        "SELECT 1 FROM escalations WHERE routine_id = ? AND local_date = ?",
+                        (routine_id, local_date),
+                    )
+                    if not cur_esc.fetchone():
+                        logger.warning(
+                            "Callback routine '%s' date '%s' has no escalation row: alert is no longer active",
+                            routine_id,
+                            local_date,
+                        )
+                        if cb_id:
+                            self.answer_callback_query(cb_id, text="This alert is no longer active.")
+                        continue
+
                     r_row = get_routine(conn, routine_id)
                     device_id = r_row["device_id"] if r_row else "unknown_device"
                     event_type = r_row["expected_event_type"] if r_row else "motion_detected"
@@ -1000,10 +1014,21 @@ class TelegramNotifier(Notifier):
                     row = cur.fetchone()
                     if row:
                         local_date = row["local_date"]
-                if not local_date:
-                    local_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
                 if routine_id and local_date:
+                    cur_esc = conn.execute(
+                        "SELECT 1 FROM escalations WHERE routine_id = ? AND local_date = ?",
+                        (routine_id, local_date),
+                    )
+                    if not cur_esc.fetchone():
+                        logger.warning(
+                            "Callback routine '%s' date '%s' has no escalation row: alert is no longer active",
+                            routine_id,
+                            local_date,
+                        )
+                        if cb_id:
+                            self.answer_callback_query(cb_id, text="This alert is no longer active.")
+                        continue
+
                     ack_escalation(conn, routine_id, local_date, now_iso)
                     if cb_id:
                         self.answer_callback_query(cb_id, text="Escalation acknowledged.")
