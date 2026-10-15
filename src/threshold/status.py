@@ -98,7 +98,8 @@ def _last_satisfied_within_window(
         tz = ZoneInfo(routine.timezone)
         sat = sat.replace(tzinfo=tz)
 
-    return window_start <= sat <= window_end
+    grace_end = window_end + timedelta(minutes=routine.escalation_delay_minutes)
+    return window_start <= sat <= grace_end
 
 
 def derive_status(

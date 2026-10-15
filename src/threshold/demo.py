@@ -487,7 +487,7 @@ def run_demo(
         beat_num=2,
         title="The Silence & Absence Detection",
         local_time="09:00 -> 09:31 CDT (14:00 -> 14:31 UTC)",
-        subtitle="Medicine cabinet window ends at 09:00. 30m grace buffer expires at 09:30. Silence.",
+        subtitle="Medicine cabinet window ends at 09:00. 30m grace buffer counts activity until 09:30 deadline. Silence.",
     )
 
     # 1. Advance to 09:00 CDT (Window ends, 30m grace buffer active)
@@ -497,7 +497,7 @@ def run_demo(
     c_sync_9.close()
 
     res_2a = scheduler.tick()
-    print_timeline_row("14:00 UTC", "09:00 CDT", res_2a["statuses"]["rt_morning_medicine"], res_2a["statuses"]["rt_morning_door"], "0 active", "Window closed, 30m grace buffer active (no panic)")
+    print_timeline_row("14:00 UTC", "09:00 CDT", res_2a["statuses"]["rt_morning_medicine"], res_2a["statuses"]["rt_morning_door"], "0 active", "Window closed, 30m grace buffer active (activity counts until 09:30)")
 
     pace_pause(1.2)
 
