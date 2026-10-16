@@ -14,7 +14,7 @@
     },
     {
       "tier": "check_needed",
-      "recommendation": "Motion detected at {local_time}, but household memory shows repeated past false alarms at this hour. Marked check needed without notification.",
+      "recommendation": "Motion detected at {local_time}, but household memory shows repeated past false alarms for this device. Marked check needed without notification.",
       "cited_call_ids": [
         "call_1"
       ],

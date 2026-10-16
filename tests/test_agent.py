@@ -4,7 +4,7 @@ Standard library only; offline, deterministic.
 """
 
 import ast
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import sqlite3
@@ -726,6 +726,13 @@ class TestAgentLibrary(unittest.TestCase):
         self.assertEqual(dec.reason_code, "check_needed")
         self.assertIn("repeated past false alarms", inv.recommendation)
 
+        # Evidence is derived strictly from real check_household_memory tool result (not trace text)
+        self.assertEqual(len(inv.evidence), 1)
+        self.assertEqual(inv.evidence[0].tool, "check_household_memory")
+        self.assertTrue(inv.evidence[0].ok)
+        self.assertIn("3 false alarm(s) out of 3 correction(s)", inv.evidence[0].text)
+        self.assertIn("cam_front", inv.evidence[0].text)
+
     def test_triggers_unexpected_activity(self):
         """is_ambiguous_event correctly identifies quiet hours unexpected activity and dedupes."""
         save_routine(
@@ -1230,6 +1237,424 @@ class TestAgentLibrary(unittest.TestCase):
         self.assertEqual(len(processed), 3)
         self.assertFalse(any(p["ambiguous"] for p in processed))
         self.assertEqual(get_app_state(self.conn, "agent_event_cursor"), "3")
+
+    # --- 7. A8b Gap Closure Tests (Deterministic Trigger, Dedupe, Notifications, Cursor, Isolation) ---
+
+    def test_is_ambiguous_false_for_non_motion_event(self):
+        """is_ambiguous_event is False for non-motion events (e.g. door_opened, battery_low)."""
+        save_routine(
+            self.conn,
+            routine_id="rt_day",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+        event_door = {
+            "event_type": "door_opened",
+            "device_id": "cam_front",
+            "occurred_at": "2026-10-12T07:10:00Z",  # 02:10 CDT (quiet hours)
+        }
+        self.assertIsNone(is_ambiguous_event(self.conn, event_door, now))
+
+    def test_is_ambiguous_false_for_device_in_no_routine(self):
+        """is_ambiguous_event is False for motion on a device not part of any routine."""
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+        event_untracked = {
+            "event_type": "motion_detected",
+            "device_id": "sensor_untracked_yard",
+            "occurred_at": "2026-10-12T07:10:00Z",  # 02:10 CDT (quiet hours)
+        }
+        self.assertIsNone(is_ambiguous_event(self.conn, event_untracked, now))
+
+    def test_is_ambiguous_false_for_motion_satisfying_routine_in_window_grace(self):
+        """is_ambiguous_event is False for motion that satisfies a routine within window + grace."""
+        save_routine(
+            self.conn,
+            routine_id="rt_med",
+            property_id="prop_1",
+            name="Morning Med",
+            device_id="sensor_cabinet",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+            escalation_delay_minutes=30,
+        )
+        now = datetime(2026, 10, 12, 14, 0, tzinfo=timezone.utc)
+        # Event at 07:30 CDT (12:30 UTC) satisfies the routine
+        event_in_window = {
+            "event_type": "motion_detected",
+            "device_id": "sensor_cabinet",
+            "occurred_at": "2026-10-12T12:30:00Z",
+        }
+        self.assertIsNone(is_ambiguous_event(self.conn, event_in_window, now))
+
+        # Event at 09:15 CDT (14:15 UTC, inside 30m grace buffer) satisfies routine
+        event_in_grace = {
+            "event_type": "motion_detected",
+            "device_id": "sensor_cabinet",
+            "occurred_at": "2026-10-12T14:15:00Z",
+        }
+        self.assertIsNone(is_ambiguous_event(self.conn, event_in_grace, now))
+
+    def test_is_ambiguous_false_for_motion_outside_quiet_hours(self):
+        """is_ambiguous_event is False for motion outside quiet hours (daytime)."""
+        save_routine(
+            self.conn,
+            routine_id="rt_day",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        now = datetime(2026, 10, 12, 20, 0, tzinfo=timezone.utc)
+        # 14:00 CDT = 19:00 UTC (daytime, not in 23:00-05:00 CDT quiet hours)
+        event_daytime = {
+            "event_type": "motion_detected",
+            "device_id": "cam_front",
+            "occurred_at": "2026-10-12T19:00:00Z",
+        }
+        self.assertIsNone(is_ambiguous_event(self.conn, event_daytime, now))
+
+    def test_is_ambiguous_true_for_quiet_hours_unexpected_motion(self):
+        """is_ambiguous_event is True for unexpected motion during quiet hours."""
+        save_routine(
+            self.conn,
+            routine_id="rt_day",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+        # 02:10 CDT = 07:10 UTC (inside quiet hours 23:00-05:00)
+        event_quiet = {
+            "event_type": "motion_detected",
+            "device_id": "cam_front",
+            "occurred_at": "2026-10-12T07:10:00Z",
+        }
+        reason = is_ambiguous_event(self.conn, event_quiet, now)
+        self.assertEqual(reason, "quiet_hours_unexpected_activity")
+
+    def test_device_level_dedupe_within_30m_after_30m_and_different_device(self):
+        """
+        Dedupe: 2nd event on SAME device <30m later is NOT investigated;
+        event >30m later IS investigated; different device is NOT deduped.
+        """
+        save_routine(
+            self.conn,
+            routine_id="rt_cam1",
+            property_id="prop_1",
+            name="Front Cam",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        save_routine(
+            self.conn,
+            routine_id="rt_cam2",
+            property_id="prop_1",
+            name="Back Cam",
+            device_id="cam_back",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+
+        # Save an initial investigation for cam_front at 02:10 CDT (07:10 UTC)
+        save_investigation(
+            self.conn,
+            event_key="evt_init",
+            device_id="cam_front",
+            created_at=datetime(2026, 10, 12, 7, 10, tzinfo=timezone.utc),
+            mode="agent",
+            provider_name="mock",
+            tier="check_needed",
+            decision="check_needed",
+            reason_code="quiet_hours_unexpected_activity",
+        )
+
+        # 1. Same device, 15m later (02:25 CDT = 07:25 UTC) -> < 30m -> DEDUPED (None)
+        event_same_15m = {
+            "event_type": "motion_detected",
+            "device_id": "cam_front",
+            "occurred_at": "2026-10-12T07:25:00Z",
+        }
+        eval_time_15m = datetime(2026, 10, 12, 7, 25, tzinfo=timezone.utc)
+        self.assertIsNone(is_ambiguous_event(self.conn, event_same_15m, eval_time_15m))
+
+        # 2. Same device, 35m later (02:45 CDT = 07:45 UTC) -> > 30m -> INVESTIGATED (Triggered)
+        event_same_35m = {
+            "event_type": "motion_detected",
+            "device_id": "cam_front",
+            "occurred_at": "2026-10-12T07:45:00Z",
+        }
+        eval_time_35m = datetime(2026, 10, 12, 7, 45, tzinfo=timezone.utc)
+        self.assertEqual(
+            is_ambiguous_event(self.conn, event_same_35m, eval_time_35m),
+            "quiet_hours_unexpected_activity",
+        )
+
+        # 3. Different device (cam_back) at 02:25 CDT -> NOT DEDUPED (Triggered)
+        event_diff_dev = {
+            "event_type": "motion_detected",
+            "device_id": "cam_back",
+            "occurred_at": "2026-10-12T07:25:00Z",
+        }
+        self.assertEqual(
+            is_ambiguous_event(self.conn, event_diff_dev, eval_time_15m),
+            "quiet_hours_unexpected_activity",
+        )
+
+    def test_agent_notifications_exhaustive_modes_and_tiers(self):
+        """
+        Verify notification matrix:
+        - notify_enabled=True + escalate -> 1 CHECK NEEDED message and notified_at set
+        - notify_enabled=False + escalate -> 0 messages, notified_at is None
+        - notify_enabled=True + check_needed -> 0 messages, notified_at is None
+        - notify_enabled=True + routine -> 0 messages, notified_at is None
+        """
+        save_routine(
+            self.conn,
+            routine_id="rt_day",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+
+        # Case 1: notify_enabled=True + escalate
+        save_event(self.conn, "webhook", "evt_esc_notif", "cam_front", "motion", "2026-10-12T07:10:00Z", "2026-10-12T07:10:00Z", {})
+        set_app_state(self.conn, "agent_event_cursor", "0")
+        notifier_1 = RecordingNotifier()
+        cfg_1 = AgentConfig(enabled=True, notify_enabled=True, trace_file="trace_escalate_two_tools.json")
+        res_1 = process_new_events(
+            conn=self.conn,
+            provider_factory=lambda: MockProvider("trace_escalate_two_tools.json"),
+            now=now,
+            cfg=cfg_1,
+            notifier=notifier_1,
+            ring_client=FakeRingClient("success"),
+        )
+        self.assertEqual(len(res_1), 1)
+        self.assertEqual(res_1[0]["decision"], "escalate")
+        self.assertTrue(res_1[0]["notified"])
+        self.assertEqual(len(notifier_1.sent), 1)
+        self.assertIn("CHECK NEEDED", notifier_1.sent[0]["text"])
+        inv_1 = get_investigation(self.conn, "evt_esc_notif")
+        self.assertIsNotNone(inv_1["notified_at"])
+
+        # Case 2: notify_enabled=False + escalate
+        save_event(self.conn, "webhook", "evt_esc_nonotif", "cam_front", "motion", "2026-10-12T07:45:00Z", "2026-10-12T07:45:00Z", {})
+        notifier_2 = RecordingNotifier()
+        cfg_2 = AgentConfig(enabled=True, notify_enabled=False, trace_file="trace_escalate_two_tools.json")
+        res_2 = process_new_events(
+            conn=self.conn,
+            provider_factory=lambda: MockProvider("trace_escalate_two_tools.json"),
+            now=now + timedelta(minutes=45),
+            cfg=cfg_2,
+            notifier=notifier_2,
+            ring_client=FakeRingClient("success"),
+        )
+        self.assertEqual(len(res_2), 1)
+        self.assertEqual(res_2[0]["decision"], "escalate")
+        self.assertFalse(res_2[0]["notified"])
+        self.assertEqual(len(notifier_2.sent), 0)
+        inv_2 = get_investigation(self.conn, "evt_esc_nonotif")
+        self.assertIsNone(inv_2["notified_at"])
+
+        # Case 3: notify_enabled=True + check_needed (1 tool only -> downgrade)
+        save_event(self.conn, "webhook", "evt_cn_notif", "cam_front", "motion", "2026-10-12T08:30:00Z", "2026-10-12T08:30:00Z", {})
+        notifier_3 = RecordingNotifier()
+        cfg_3 = AgentConfig(enabled=True, notify_enabled=True, trace_file="trace_escalate_one_tool.json")
+        res_3 = process_new_events(
+            conn=self.conn,
+            provider_factory=lambda: MockProvider("trace_escalate_one_tool.json"),
+            now=now + timedelta(hours=2),
+            cfg=cfg_3,
+            notifier=notifier_3,
+            ring_client=FakeRingClient("success"),
+        )
+        self.assertEqual(len(res_3), 1)
+        self.assertEqual(res_3[0]["decision"], "check_needed")
+        self.assertFalse(res_3[0]["notified"])
+        self.assertEqual(len(notifier_3.sent), 0)
+        inv_3 = get_investigation(self.conn, "evt_cn_notif")
+        self.assertIsNone(inv_3["notified_at"])
+
+        # Case 4: notify_enabled=True + routine tier
+        save_event(self.conn, "webhook", "evt_rt_notif", "cam_front", "motion", "2026-10-12T09:15:00Z", "2026-10-12T09:15:00Z", {})
+        notifier_4 = RecordingNotifier()
+        cfg_4 = AgentConfig(enabled=True, notify_enabled=True)
+        class RoutineProvider:
+            name = "mock_routine"
+            mode = "agent"
+            def next(self, state, tool_specs, deadline=None):
+                return Final(tier="routine", recommendation="Routine activity confirmed", cited_call_ids=[])
+        res_4 = process_new_events(
+            conn=self.conn,
+            provider_factory=RoutineProvider,
+            now=now + timedelta(hours=3),
+            cfg=cfg_4,
+            notifier=notifier_4,
+            ring_client=FakeRingClient("success"),
+        )
+        self.assertEqual(len(res_4), 1)
+        self.assertEqual(res_4[0]["decision"], "routine")
+        self.assertFalse(res_4[0]["notified"])
+        self.assertEqual(len(notifier_4.sent), 0)
+        inv_4 = get_investigation(self.conn, "evt_rt_notif")
+        self.assertIsNone(inv_4["notified_at"])
+
+    def test_cursor_advances_and_second_tick_reprocesses_nothing(self):
+        """Cursor advances on tick 1; second tick re-processes nothing."""
+        set_app_state(self.conn, "agent_event_cursor", "0")
+        save_routine(
+            self.conn,
+            routine_id="rt_day",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+
+        # 3 events
+        save_event(self.conn, "webhook", "evt_c1", "cam_front", "motion", "2026-10-12T12:30:00Z", "2026-10-12T12:30:00Z", {})
+        save_event(self.conn, "webhook", "evt_c2", "cam_front", "motion", "2026-10-12T07:10:00Z", "2026-10-12T07:10:00Z", {})
+        save_event(self.conn, "webhook", "evt_c3", "cam_front", "motion", "2026-10-12T19:00:00Z", "2026-10-12T19:00:00Z", {})
+
+        agent_cfg = AgentConfig(enabled=True, trace_file="trace_escalate_two_tools.json")
+        now = datetime(2026, 10, 12, 13, 0, tzinfo=timezone.utc)
+
+        # Tick 1: processes all 3 events
+        res_tick1 = process_new_events(
+            conn=self.conn,
+            provider_factory=lambda: MockProvider("trace_escalate_two_tools.json"),
+            now=now,
+            cfg=agent_cfg,
+            ring_client=FakeRingClient("success"),
+        )
+        self.assertEqual(len(res_tick1), 3)
+        self.assertEqual(get_app_state(self.conn, "agent_event_cursor"), "3")
+
+        # Tick 2: no new events in DB -> re-processes nothing
+        call_count = 0
+        def counting_factory():
+            nonlocal call_count
+            call_count += 1
+            return MockProvider("trace_escalate_two_tools.json")
+
+        res_tick2 = process_new_events(
+            conn=self.conn,
+            provider_factory=counting_factory,
+            now=now + timedelta(minutes=5),
+            cfg=agent_cfg,
+        )
+        self.assertEqual(len(res_tick2), 0)
+        self.assertEqual(call_count, 0)
+        self.assertEqual(get_app_state(self.conn, "agent_event_cursor"), "3")
+
+    def test_runner_per_event_exception_isolation_multi_event(self):
+        """An unhandled exception on event N does not stop event N+1 from being processed."""
+        set_app_state(self.conn, "agent_event_cursor", "0")
+        save_routine(
+            self.conn,
+            routine_id="rt_day",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+
+        save_routine(
+            self.conn,
+            routine_id="rt_back",
+            property_id="prop_1",
+            name="Back Door",
+            device_id="cam_back",
+            expected_event_type="motion",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_back", 1, "2026-10-12T07:00:00Z", "webhook")
+
+        save_event(self.conn, "webhook", "evt_fail_1", "cam_front", "motion", "2026-10-12T07:10:00Z", "2026-10-12T07:10:00Z", {})
+        save_event(self.conn, "webhook", "evt_pass_2", "cam_back", "motion", "2026-10-12T07:15:00Z", "2026-10-12T07:15:00Z", {})
+
+        agent_cfg = AgentConfig(enabled=True, trace_file="trace_escalate_two_tools.json")
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+
+        invocations = 0
+        def alternating_factory():
+            nonlocal invocations
+            invocations += 1
+            if invocations == 1:
+                raise RuntimeError("Explosion on event 1")
+            return MockProvider("trace_escalate_two_tools.json")
+
+        processed = process_new_events(
+            conn=self.conn,
+            provider_factory=alternating_factory,
+            now=now,
+            cfg=agent_cfg,
+            ring_client=FakeRingClient("success"),
+        )
+
+        self.assertEqual(len(processed), 2)
+        # Event 1 failed cleanly with error isolation
+        self.assertIn("error", processed[0])
+        inv_1 = get_investigation(self.conn, "evt_fail_1")
+        self.assertIsNotNone(inv_1)
+        self.assertEqual(inv_1["mode"], "fallback")
+        self.assertEqual(inv_1["tier"], "check_needed")
+
+        # Event 2 succeeded despite event 1's exception
+        self.assertTrue(processed[1]["ambiguous"])
+        self.assertEqual(processed[1]["decision"], "escalate")
+        inv_2 = get_investigation(self.conn, "evt_pass_2")
+        self.assertIsNotNone(inv_2)
+        self.assertEqual(inv_2["decision"], "escalate")
+
+        # Cursor advanced past both events to 2
+        self.assertEqual(get_app_state(self.conn, "agent_event_cursor"), "2")
 
     # --- 8. Import Guard (AST-Based) ---
 
