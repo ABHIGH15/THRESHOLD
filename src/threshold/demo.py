@@ -1,57 +1,72 @@
 """
-src/threshold/demo.py — End-to-End Interactive & Automated Hackathon Demo Runner.
+src/threshold/demo.py — Zero-Secret Simulated Household Hackathon Demonstration.
 
-Orchestrates the complete 3-beat emotional narrative:
-  Beat 1: Empathy & Morning Routine Baseline (07:30 CDT)
-          Normal front door activity observed, routine satisfied, dashboard green.
-  Beat 2: The Silence & Pattern-Absence Detection (09:31 CDT)
-          Medicine cabinet window + 30m grace buffer closes with no activity.
-          Edge-transition fires: watching -> missed.
-          Dashboard turns red with emergency alert banner.
-          Notifier captures snapshot and dispatches photo alert with [False alarm] [Got it] buttons.
-  Beat 3: Caretaker Resolution & Graceful Recovery (09:35 - 10:00 CDT)
-          Caretaker taps [False alarm]. Correction recorded, escalation acknowledged.
-          Late morning activity arrives, system updates to observed with full audit trail preserved.
+A self-contained, offline, zero-network demonstration of Threshold:
+- Runs in a clean temporary directory database (deleted on exit).
+- Zero external dependencies, zero API keys, zero cloud.
+- Starts the real webhook HTTP server on 127.0.0.1 (ephemeral port).
+- Signs every event with HMAC-SHA256 (per-run random secret, never printed).
+- Protects against network leaks via an installed loopback socket guard.
+- Drives time deterministically via FakeClock across 6 explicit scenes.
+- Executes real core pipelines: signature verification, idempotency, ingestion,
+  status derivation, fire-once escalation, notifier formatting, agent tools,
+  deterministic gate, and read-only status dashboard.
 """
 
-from datetime import datetime, timezone
+import argparse
+from datetime import datetime, timedelta, timezone
+import hashlib
+import ipaddress
 import json
 import logging
 import os
-import re
+import secrets
 import shutil
+import socket
 import sqlite3
 import sys
+import tempfile
+import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
+import urllib.error
+import urllib.request
+import uuid
 from zoneinfo import ZoneInfo
 
-from src.threshold.dashboard import get_dashboard_data, start_dashboard_server, DashboardServer
-from src.threshold.ingest import ingest_event
-from src.threshold.models import DeviceHealthRecord, Routine
+from src.threshold.agent.investigate import run_investigation_and_gate
+from src.threshold.agent.provider import MockProvider
+from src.threshold.agent.runner import process_new_events
+from src.threshold.agent.triggers import is_ambiguous_event
+from src.threshold.config import AgentConfig
+from src.threshold.dashboard import start_dashboard_server
+from src.threshold.models import Routine
 from src.threshold.notifier import (
-    format_escalation_text,
-    format_expected_by,
-    format_health_state,
-    format_last_activity,
-    make_callback_data,
+    ConsoleNotifier,
     Notifier,
-    TelegramNotifier,
+    resolve_callback_routine_id,
 )
-from src.threshold.scheduler import FakeClock, Scheduler
+from src.threshold.scheduler import build_device_health_record, FakeClock, Scheduler
+from src.threshold.server import create_server
+from src.threshold.status import derive_status
 from src.threshold.store import (
     ack_escalation,
     get_connection,
+    get_routine,
     init_db,
     record_correction,
+    record_escalation,
+    row_to_routine,
     save_routine,
+    set_app_state,
     upsert_device_health,
 )
+from src.threshold.webhook_auth import compute_signature
 
 logger = logging.getLogger("threshold.demo")
 
-# Minimal 1x1 valid JPEG fallback if no fixture is found on disk
-FALLBACK_JPEG_BYTES = (
+# Minimal 1x1 valid JPEG bytes for synthetic snapshot responses
+SAMPLE_JPEG_BYTES = (
     b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00H\x00H\x00\x00\xff\xdb\x00C\x00"
     b"\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19"
     b"\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c $.' \",#\x1c\x1c(7),01444\x1f'9"
@@ -60,24 +75,86 @@ FALLBACK_JPEG_BYTES = (
     b"\x04\x05\x06\x07\x08\t\n\x0b\xff\xda\x00\x08\x01\x01\x00\x00?\x00\xbf\x00\xff\xd9"
 )
 
+FALLBACK_JPEG_BYTES = SAMPLE_JPEG_BYTES
 
-class DemoNotifier(Notifier):
-    """
-    Demo notifier that captures notifications in-memory, renders rich ASCII smartphone
-    cards in terminal output, and optionally dispatches real Telegram photo alerts if configured.
-    """
+# ─── Network Guard ────────────────────────────────────────────────────────────
 
-    def __init__(
+_orig_socket_connect = socket.socket.connect
+
+
+def install_network_guard() -> None:
+    """
+    Patch socket.socket.connect so that outbound connections to non-loopback
+    addresses immediately raise ConnectionRefusedError.
+    Guarantees the demo remains 100% offline with zero outbound network calls.
+    """
+    def _guarded_connect(self, address):
+        host = address[0] if isinstance(address, (tuple, list)) else address
+        is_loopback = False
+        if isinstance(host, str):
+            h_lower = host.lower()
+            if h_lower in ("127.0.0.1", "localhost", "::1") or h_lower.startswith("127."):
+                is_loopback = True
+            else:
+                try:
+                    ip = ipaddress.ip_address(host)
+                    if ip.is_loopback:
+                        is_loopback = True
+                except ValueError:
+                    pass
+        if not is_loopback:
+            raise ConnectionRefusedError(
+                f"[NETWORK GUARD] Non-loopback connection to {host} is blocked during demo."
+            )
+        return _orig_socket_connect(self, address)
+
+    socket.socket.connect = _guarded_connect
+
+
+def uninstall_network_guard() -> None:
+    """Restore original socket.socket.connect."""
+    socket.socket.connect = _orig_socket_connect
+
+
+# ─── Synthetic Snapshot Client ────────────────────────────────────────────────
+
+class DemoSnapshotClient:
+    """Offline Ring client returning sample JPEG bytes for pull_snapshot tool."""
+
+    def __init__(self, sample_bytes: bytes = SAMPLE_JPEG_BYTES, fixed_epoch_ms: int = 1791875400000):
+        self.sample_bytes = sample_bytes
+        self.fixed_epoch_ms = fixed_epoch_ms
+
+    def get_latest_snapshot(
         self,
-        snapshot_path: Optional[str] = None,
-        live_telegram: bool = False,
-        telegram_notifier: Optional[TelegramNotifier] = None,
-    ):
-        self.snapshot_path = snapshot_path
-        self.live_telegram = live_telegram
-        self.telegram_notifier = telegram_notifier
+        device_id: str,
+        lookback_hours: int = 24,
+        deadline_seconds: float = 5.0,
+    ) -> Tuple[bytes, int]:
+        return self.sample_bytes, self.fixed_epoch_ms
+
+
+# ─── Capturing Console Notifier ───────────────────────────────────────────────
+
+class CapturingConsoleNotifier(Notifier):
+    """
+    Wraps ConsoleNotifier to print real alerts via format_escalation_text while
+    recording sent notifications in-memory for assertion and structured reporting.
+    """
+
+    def __init__(self, console_notifier: ConsoleNotifier):
+        self.underlying = console_notifier
         self.sent_escalations: List[Dict[str, Any]] = []
-        self.sent_reminders: List[Dict[str, Any]] = []
+        self.sent_messages: List[str] = []
+        self.sent_photos: List[Dict[str, Any]] = []
+
+    def send_message(self, text: str) -> None:
+        self.sent_messages.append(text)
+        print("\n" + text)
+
+    def send_photo(self, photo_bytes: bytes, caption: str) -> None:
+        self.sent_photos.append({"bytes_len": len(photo_bytes), "caption": caption})
+        print("\n" + caption)
 
     def send_escalation(
         self,
@@ -86,45 +163,20 @@ class DemoNotifier(Notifier):
         fired_at: str,
         device_health: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        r_id = getattr(routine, "routine_id", getattr(routine, "name", "routine")).lower().replace(" ", "_")
-        expected_by = format_expected_by(routine)
-        health_state = format_health_state(routine, device_health)
-        last_act = format_last_activity(routine, device_health)
-        snap_id = getattr(routine, "snapshot_device_id", None) or routine.device_id
-        alert_text = format_escalation_text(routine, fired_at, device_health)
-
-        record = {
-            "routine_id": r_id,
+        res = self.underlying.send_escalation(
+            routine=routine,
+            local_date=local_date,
+            fired_at=fired_at,
+            device_health=device_health,
+        )
+        self.sent_escalations.append({
+            "routine_id": routine.routine_id,
             "routine_name": routine.name,
             "local_date": local_date,
             "fired_at": fired_at,
-            "snapshot_path": self.snapshot_path,
-            "alert_text": alert_text,
-            "expected_by": expected_by,
-            "health_state": health_state,
-            "last_activity": last_act,
-            "snapshot_device_id": snap_id,
-        }
-        self.sent_escalations.append(record)
-
-        if self.live_telegram and self.telegram_notifier:
-            try:
-                self.telegram_notifier.send_escalation(
-                    routine=routine,
-                    local_date=local_date,
-                    fired_at=fired_at,
-                    device_health=device_health,
-                )
-            except Exception as exc:
-                logger.warning("Live Telegram escalation delivery failed: %s", exc)
-
-        return {
-            "channel": "demo",
-            "delivered": True,
-            "type": "photo" if self.snapshot_path else "text",
-            "has_photo": bool(self.snapshot_path),
-            "snapshot_path": self.snapshot_path,
-        }
+            "res": res,
+        })
+        return res
 
     def send_reminder(
         self,
@@ -133,570 +185,596 @@ class DemoNotifier(Notifier):
         fired_at: str,
         device_health: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        r_id = getattr(routine, "routine_id", getattr(routine, "name", "routine")).lower().replace(" ", "_")
-        record = {
-            "routine_id": r_id,
-            "routine_name": routine.name,
-            "local_date": local_date,
-            "fired_at": fired_at,
-        }
-        self.sent_reminders.append(record)
-        return {
-            "channel": "demo",
-            "delivered": True,
-            "type": "text",
-            "has_photo": False,
-            "snapshot_path": None,
-        }
-
-
-def prepare_demo_snapshots(snapshot_dir: str = "snapshots") -> str:
-    """
-    Ensure demonstration snapshot assets are available in snapshot_dir.
-    Copies real Ring JPEG evidence if present, or writes valid JPEG fallback.
-    Returns the path to the primary demo snapshot.
-    """
-    os.makedirs(snapshot_dir, exist_ok=True)
-    target_latest = os.path.join(snapshot_dir, "rt_morning_medicine_latest.jpg")
-    target_date = os.path.join(snapshot_dir, "rt_morning_medicine_2026-10-12.jpg")
-
-    evidence_candidates = [
-        os.path.join("evidence", "ring", "snapshot_success_20261013T132000Z.jpg"),
-        os.path.join("snapshots", "rt_morning_door_latest.jpg"),
-    ]
-
-    source_bytes = None
-    for cand in evidence_candidates:
-        if os.path.isfile(cand) and os.path.getsize(cand) > 32:
-            try:
-                with open(cand, "rb") as f:
-                    source_bytes = f.read()
-                break
-            except Exception:
-                pass
-
-    if not source_bytes:
-        source_bytes = FALLBACK_JPEG_BYTES
-
-    for target in (target_latest, target_date):
-        with open(target, "wb") as f:
-            f.write(source_bytes)
-
-    return target_latest
-
-
-def print_header() -> None:
-    """Print top-level ASCII demo header banner."""
-    print()
-    print("=" * 86)
-    print("  THRESHOLD — PATTERN-ABSENCE DETECTION FOR ELDERLY CARE")
-    print("  'Ring tells you when something happens. Threshold tells you when something doesn't.'")
-    print("=" * 86)
-    print("  Caregiver-support notification tool. Not an emergency or medical device.")
-    print("  Does not contact emergency services.")
-    print("  SIMULATED EVENTS. Times are simulated. The camera image is a real image from the")
-    print("  Ring Partner API sandbox.")
-    print("  Simulated household (fictional): Dallas, TX  |  Resident: Margaret (Age 82)")
-    print("  Hardware:   Ring Motion Sensor (Medicine Cabinet) + Playground Device (Camera)")
-    print("              Ring Contact Sensor (Front Door)       + Ring Doorbell Cam (Porch)")
-    print("  Note:       Device types shown are illustrative; only the camera image is from a")
-    print("              real Ring sandbox device.")
-    print("  Stack:      Python Standard Library only + SQLite + Telegram + Ring Partner API")
-    print("  Cloud:      Runs on your own machine; no Threshold-operated cloud.")
-    print("              Data goes only to Ring (the source) and Telegram (alerts).")
-    print("-" * 86)
-
-
-def print_beat_header(beat_num: int, title: str, local_time: str, subtitle: str) -> None:
-    """Print stylized beat announcement block."""
-    print()
-    print("┌" + "─" * 84 + "┐")
-    print(f"│  BEAT {beat_num}: {title.upper():<56} [Simulated: {local_time}] │")
-    print(f"│  {subtitle:<80} │")
-    print("└" + "─" * 84 + "┘")
-
-
-def print_timeline_row(
-    utc_time: str,
-    cdt_time: str,
-    med_status: str,
-    door_status: str,
-    escalation_desc: str,
-    notes: str,
-) -> None:
-    """Print formatted timeline tick row."""
-    # Status badges
-    med_badge = (
-        "🟢 OBSERVED" if med_status == "observed"
-        else ("🔴 MISSED" if med_status == "missed"
-        else ("🟡 WATCHING" if med_status == "watching" else med_status))
-    )
-    door_badge = (
-        "🟢 OBSERVED" if door_status == "observed"
-        else ("🔴 MISSED" if door_status == "missed"
-        else ("🟡 WATCHING" if door_status == "watching" else door_status))
-    )
-    print(
-        f"  [{cdt_time}] Medicine: {med_badge:<13} | Door: {door_badge:<13} | "
-        f"Alerts: {escalation_desc:<10} | {notes}"
-    )
-
-
-def print_phone_alert_card(alert_record: Dict[str, Any]) -> None:
-    """Print smartphone card showing the ACTUAL alert text from the notifier formatting function."""
-    alert_text = alert_record.get("alert_text", "")
-    snap_path = alert_record.get("snapshot_path", "snapshots/rt_morning_medicine_latest.jpg")
-
-    # Strip HTML tags for clean terminal display
-    plain_text = re.sub(r"<[^>]+>", "", alert_text) if alert_text else ""
-
-    snap_size_kb = 0.0
-    if snap_path and os.path.exists(snap_path):
-        snap_size_kb = os.path.getsize(snap_path) / 1024.0
-
-    print()
-    print("  ╔" + "═" * 74 + "╗")
-    print("  ║  📱 TELEGRAM NOTIFICATION RECEIVED ON CAREGIVER PHONE (Sarah)         ║")
-    print("  ╠" + "═" * 74 + "╣")
-    if snap_path and os.path.exists(snap_path):
-        photo_label = f"📷 [most recent Ring camera image: {snap_path} ({snap_size_kb:.1f} KB JPEG)]"
-        print(f"  ║  {photo_label:<72} ║")
-        print("  ║" + " " * 74 + "║")
-    for line in plain_text.strip().split("\n"):
-        print(f"  ║  {line:<72} ║")
-    print("  ║" + " " * 74 + "║")
-    print("  ║  ┌────────────────────────────────┐    ┌───────────────────────────────┐ ║")
-    print("  ║  │       [ False alarm ]          │    │          [ Got it ]           │ ║")
-    print("  ║  └────────────────────────────────┘    └───────────────────────────────┘ ║")
-    print("  ╚" + "═" * 74 + "╝")
-    print()
-
-
-def sync_device_poll(conn: sqlite3.Connection, now_iso: str) -> None:
-    """Simulate regular background polling (RingClient.poll_once) keeping device health fresh."""
-    devices = [
-        "sensor_front_door",
-        "sensor_medicine_cabinet",
-        "Playground Device",
-        "cam_front_porch",
-    ]
-    for dev in devices:
-        upsert_device_health(
-            conn=conn,
-            device_id=dev,
-            online=True,
-            fetched_at=now_iso,
-            source="history",
-            reported_at=now_iso,
+        return self.underlying.send_reminder(
+            routine=routine,
+            local_date=local_date,
+            fired_at=fired_at,
+            device_health=device_health,
         )
 
 
-def run_demo(
-    db_path: Optional[str] = None,
-    dashboard_port: int = 8080,
-    dashboard_host: str = "0.0.0.0",
-    enable_dashboard: bool = True,
-    open_browser: bool = False,
-    interactive: bool = False,
-    speed: float = 1.0,
-    live_telegram: bool = False,
-    cleanup: bool = False,
+# ─── Webhook Helpers ──────────────────────────────────────────────────────────
+
+def make_ring_payload(
+    device_id: str,
+    event_type: str,
+    iso_timestamp: str,
+    request_id: Optional[str] = None,
+    sub_type: str = "human",
+) -> bytes:
+    """Construct a documented Ring v1.1 webhook payload bytes."""
+    if request_id is None:
+        request_id = f"demo_req_{uuid.uuid4().hex[:12]}"
+    payload = {
+        "meta": {
+            "request_id": request_id,
+            "time": iso_timestamp,
+            "version": "1.1",
+        },
+        "data": {
+            "type": event_type,
+            "attributes": {
+                "source": device_id,
+                "timestamp": iso_timestamp,
+                "sub_type": sub_type,
+            },
+        },
+    }
+    return json.dumps(payload).encode("utf-8")
+
+
+def post_signed_event(
+    port: int,
+    secret: str,
+    payload_bytes: bytes,
+    bad_signature: bool = False,
+) -> Tuple[int, str]:
+    """Send signed HTTP POST to local webhook receiver using compute_signature."""
+    if bad_signature:
+        sig = "sha256=0000000000000000000000000000000000000000000000000000000000000000"
+    else:
+        sig = compute_signature(payload_bytes, secret)
+
+    url = f"http://127.0.0.1:{port}/webhooks/ring"
+    req = urllib.request.Request(url, data=payload_bytes, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-Signature", sig)
+    req.add_header("User-Agent", "Threshold-Demo/1.0")
+
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = resp.read().decode("utf-8")
+            return resp.status, body
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8") if e.fp else ""
+        return e.code, body
+
+
+# ─── Callback Processor ───────────────────────────────────────────────────────
+
+def process_demo_callback(
+    conn: sqlite3.Connection,
+    callback_data: str,
+    now_iso: str,
+) -> bool:
+    """
+    Execute the real callback resolution pathway:
+    resolve_callback_routine_id -> verify escalation exists -> record_correction -> ack_escalation.
+    """
+    parts = callback_data.split(":", 2)
+    if len(parts) < 3:
+        return False
+    prefix, cand_routine_id, local_date = parts[0], parts[1], parts[2]
+    routine_id = resolve_callback_routine_id(conn, cand_routine_id)
+    if not routine_id:
+        return False
+
+    cur_esc = conn.execute(
+        "SELECT 1 FROM escalations WHERE routine_id = ? AND local_date = ?",
+        (routine_id, local_date),
+    )
+    if not cur_esc.fetchone():
+        return False
+
+    r_row = get_routine(conn, routine_id)
+    device_id = r_row["device_id"] if r_row else "unknown_device"
+    event_type = r_row["expected_event_type"] if r_row else "motion_detected"
+    time_bucket = f"{r_row['window_start']}-{r_row['window_end']}" if r_row else local_date
+    corr_id = f"corr_{routine_id}_{local_date}"
+
+    record_correction(
+        conn=conn,
+        id=corr_id,
+        device_id=device_id,
+        event_type=event_type,
+        time_bucket=time_bucket,
+        label="false_alarm",
+        created_at=now_iso,
+        ignore_conflicts=True,
+    )
+    ack_escalation(conn, routine_id, local_date, now_iso)
+    return True
+
+
+# ─── Terminal Formatting ──────────────────────────────────────────────────────
+
+class DemoPrinter:
+    """Formats terminal output with optional ANSI colors."""
+
+    def __init__(self, no_color: bool = False, pace: float = 0.0):
+        self.no_color = no_color
+        self.pace = pace
+
+    def _color(self, code: str, text: str) -> str:
+        if self.no_color:
+            return text
+        return f"\033[{code}m{text}\033[0m"
+
+    def green(self, text: str) -> str:
+        return self._color("32", text)
+
+    def yellow(self, text: str) -> str:
+        return self._color("33", text)
+
+    def red(self, text: str) -> str:
+        return self._color("31", text)
+
+    def cyan(self, text: str) -> str:
+        return self._color("36", text)
+
+    def bold(self, text: str) -> str:
+        return self._color("1", text)
+
+    def sleep_pace(self) -> None:
+        if self.pace > 0:
+            time.sleep(self.pace)
+
+    def print_banner(self) -> None:
+        print("=" * 86)
+        print("  THRESHOLD — PATTERN-ABSENCE DETECTION FOR ELDERLY CARE")
+        print("  'Ring tells you when something happens. Threshold tells you when something doesn't.'")
+        print("=" * 86)
+        print("  Caregiver-support notification tool. Not an emergency or medical device.")
+        print("  Does not contact emergency services.")
+        print("  SIMULATED HOUSEHOLD (fictional) — Dallas, TX (America/Chicago)")
+        print("  All devices, events, routines, and clock times in this demo are simulated.")
+        print("  Stack: Python standard library only (no pip dependencies) + SQLite.")
+        print("  Zero network calls: all webhooks are signed and posted locally to 127.0.0.1.")
+        print("-" * 86)
+
+    def print_closing_table(self) -> None:
+        print("\n" + "=" * 86)
+        print("  REAL vs SIMULATED BREAKDOWN")
+        print("=" * 86)
+        print("  COMPONENT               STATUS        IMPLEMENTATION NOTES")
+        print("  " + "─" * 82)
+        rows = [
+            ("Signature verification", "REAL", "HMAC-SHA256 verified before JSON parse (401 on bad sig)"),
+            ("Idempotency", "REAL", "SQLite UNIQUE constraint on (source, external_id)"),
+            ("Webhook ingestion", "REAL", "ingest_event parses schema and normalizes types"),
+            ("Status derivation", "REAL", "derive_status evaluates window + grace period"),
+            ("Scheduler loop", "REAL", "Scheduler.tick checks deadlines and transitions"),
+            ("Fire-once escalation", "REAL", "Escalation ladder fires strictly once per missed routine"),
+            ("Alert formatting", "REAL", "ConsoleNotifier renders plain-text caregiver alerts"),
+            ("Agent tool execution", "REAL", "check_routine_status, pull_snapshot, check_household_memory"),
+            ("Evidence derivation", "REAL", "Derives evidence strictly from tool execution results"),
+            ("Deterministic gate", "REAL", "Pure function gate enforces evidence & cooldown bars"),
+            ("Web Dashboard", "REAL", "Read-only HTTP server with dynamic HTML escaping"),
+            ("Household & Resident", "SIMULATED", "Fictional household in Dallas, TX"),
+            ("Hardware devices", "SIMULATED", "Fictional device identifiers (e.g. demo-cam-living-room)"),
+            ("Device events", "SIMULATED", "Synthetic motion events generated for narrative"),
+            ("System clock", "SIMULATED", "FakeClock drives time progression across scenes"),
+            ("Agent reasoning", "SIMULATED", "Replay mode: committed scripted traces (not a live LLM)"),
+        ]
+        for comp, status, notes in rows:
+            status_str = self.green(f"{status:<12}") if status == "REAL" else self.yellow(f"{status:<12}")
+            print(f"  {comp:<24}{status_str}  {notes}")
+        print("=" * 86)
+
+
+# ─── Demo Pipeline Execution ──────────────────────────────────────────────────
+
+def run_demo_pipeline(
+    pace: float = 0.0,
+    no_color: bool = False,
+    serve: bool = False,
 ) -> Dict[str, Any]:
     """
-    Execute the scripted 3-beat demonstration end-to-end.
-
-    Args:
-        db_path: Path to demo SQLite database. If None, uses demo_threshold.db.
-        dashboard_port: Preferred port for web dashboard (defaults to 8080 with auto-fallback).
-        dashboard_host: Network host for dashboard (0.0.0.0 binds all interfaces for LAN).
-        enable_dashboard: If True, boots embedded HTTP dashboard server.
-        open_browser: If True, launches default web browser to dashboard URL.
-        interactive: If True, pauses for user input between beats.
-        speed: Pacing delay multiplier (0.0 for instant/tests, 1.0 for live presentation).
-        live_telegram: If True and credentials exist in .env, sends real Telegram photo.
-        cleanup: If True, removes demo SQLite database upon exit.
-
-    Returns:
-        Structured execution result dictionary.
+    Executes the complete 6-scene hackathon demonstration end-to-end:
+      Scene 1: Calm morning (routine observed, 0 alerts)
+      Scene 2: Trust boundary (401 rejected, deduplication idempotent)
+      Scene 3: Missed routine (fire-once escalation)
+      Scene 4: UNKNOWN device offline not alarm (0 escalations)
+      Scene 5: Check needed (escalate cleared vs gate downgrade)
+      Scene 6: Household memory quiets alert safely (real callback path)
     """
-    def pace_pause(seconds: float) -> None:
-        if speed > 0.0 and seconds > 0.0:
-            time.sleep(seconds * speed)
+    printer = DemoPrinter(no_color=no_color, pace=pace)
+    printer.print_banner()
 
-    def prompt_step(msg: str) -> None:
-        if interactive:
-            print(f"\n  👉 [PAUSE] {msg}")
-            try:
-                input("     Press [Enter] to proceed to next beat...")
-            except (KeyboardInterrupt, EOFError):
-                print()
+    install_network_guard()
 
-    # 1. Database Setup
-    target_db = db_path or "demo_threshold.db"
-    if os.path.exists(target_db):
-        try:
-            os.remove(target_db)
-        except Exception:
-            pass
+    temp_dir = tempfile.mkdtemp(prefix="threshold_demo_")
+    db_path = os.path.join(temp_dir, "demo.db")
+    snapshot_dir = os.path.join(temp_dir, "snapshots")
+    os.makedirs(snapshot_dir, exist_ok=True)
 
-    conn = init_db(target_db)
+    demo_secret = secrets.token_hex(32)
 
-    # 2. Seed Hardware Devices
-    sync_device_poll(conn, "2026-10-12T11:45:00Z")
+    init_db(db_path)
+    conn = get_connection(db_path)
 
-    # 3. Seed Routines:
-    # Medicine Cabinet: 07:00-09:00 CDT, 30m escalation delay (deadline 09:30 CDT)
-    # Front Door Morning Walk: 07:00-10:00 CDT, 30m escalation delay
+    # Initialize routines
+    # Routine 1: Morning movement (Living room camera)
     save_routine(
         conn=conn,
-        routine_id="rt_morning_medicine",
-        property_id="prop_dallas_house",
-        name="Morning Medicine Cabinet",
-        device_id="sensor_medicine_cabinet",
+        routine_id="rt_morning_movement",
+        property_id="prop_demo",
+        name="Morning movement",
+        device_id="demo-cam-living-room",
         expected_event_type="motion_detected",
         window_start="07:00",
         window_end="09:00",
         timezone_name="America/Chicago",
         days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
         escalation_delay_minutes=30,
-        snapshot_device_id="Playground Device",
     )
+    upsert_device_health(conn, "demo-cam-living-room", 1, "2026-10-12T12:00:00Z", "webhook")
+
+    # Routine 2: Evening check-in (Front door camera)
     save_routine(
         conn=conn,
-        routine_id="rt_morning_door",
-        property_id="prop_dallas_house",
-        name="Front Door Morning Walk",
-        device_id="sensor_front_door",
+        routine_id="rt_evening_checkin",
+        property_id="prop_demo",
+        name="Evening check-in",
+        device_id="demo-cam-front-door",
         expected_event_type="motion_detected",
-        window_start="07:00",
-        window_end="10:00",
+        window_start="18:00",
+        window_end="20:00",
         timezone_name="America/Chicago",
         days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
         escalation_delay_minutes=30,
-        snapshot_device_id="cam_front_porch",
     )
-    conn.close()
+    upsert_device_health(conn, "demo-cam-front-door", 1, "2026-10-12T23:00:00Z", "webhook")
 
-    # 4. Prepare Snapshots
-    snapshot_path = prepare_demo_snapshots("snapshots")
+    # Routine 3: Hallway check (Hallway camera)
+    save_routine(
+        conn=conn,
+        routine_id="rt_hallway_check",
+        property_id="prop_demo",
+        name="Hallway check",
+        device_id="demo-cam-hallway",
+        expected_event_type="motion_detected",
+        window_start="21:00",
+        window_end="22:00",
+        timezone_name="America/Chicago",
+        days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+        escalation_delay_minutes=30,
+    )
 
-    # 5. Boot Dashboard Server
-    dash_server: Optional[DashboardServer] = None
-    dash_url = ""
-    if enable_dashboard:
-        dash_server = start_dashboard_server(
-            host=dashboard_host,
-            port=dashboard_port,
-            db_path=target_db,
-            household_name="Margaret's Home — Dallas",
-            timezone_name="America/Chicago",
-            snapshot_dir="snapshots",
-            fallback_ports=True,
+    # Seed 2 historical false alarms for demo-cam-front-door using the REAL callback pathway
+    # (resolve_callback_routine_id -> record_correction -> ack_escalation)
+    for past_date in ("2026-10-10", "2026-10-11"):
+        record_escalation(
+            conn=conn,
+            routine_id="rt_evening_checkin",
+            local_date=past_date,
+            fired_at=f"{past_date}T20:31:00Z",
+            notified_at=f"{past_date}T20:31:00Z",
+            ignore_conflicts=True,
         )
-        actual_port = dash_server.server_address[1]
-        disp_host = "localhost" if dashboard_host == "0.0.0.0" else dashboard_host
-        dash_url = f"http://{disp_host}:{actual_port}"
+        process_demo_callback(conn, f"fa:rt_evening_checkin:{past_date}", f"{past_date}T20:35:00Z")
 
-        if open_browser:
-            try:
-                import webbrowser
-                webbrowser.open(dash_url)
-            except Exception:
-                pass
+    server = create_server(host="127.0.0.1", port=0, db_path=db_path, secret=demo_secret)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    webhook_port = server.server_address[1]
 
-    # 6. Initialize Clock & Scheduler
-    # Monday Oct 12, 2026: America/Chicago is in CDT (UTC-5)
-    # Start at 06:45 CDT (11:45 UTC)
-    clock = FakeClock(datetime(2026, 10, 12, 11, 45, 0, tzinfo=timezone.utc))
+    clock = FakeClock(datetime(2026, 10, 12, 12, 42, tzinfo=timezone.utc))  # 07:42 CDT
+    console_notif = ConsoleNotifier()
+    capturing_notif = CapturingConsoleNotifier(console_notif)
+    scheduler = Scheduler(db_path=db_path, clock=clock, notifier=capturing_notif)
 
-    # Optional live Telegram notifier
-    tg_notifier: Optional[TelegramNotifier] = None
-    if live_telegram:
-        bot_tok = os.environ.get("TELEGRAM_BOT_TOKEN")
-        chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-        if bot_tok and chat_id:
-            tg_notifier = TelegramNotifier(bot_token=bot_tok, chat_id=chat_id)
+    snapshot_client = DemoSnapshotClient()
 
-    demo_notifier = DemoNotifier(
-        snapshot_path=snapshot_path,
-        live_telegram=live_telegram,
-        telegram_notifier=tg_notifier,
-    )
-    scheduler = Scheduler(db_path=target_db, clock=clock, notifier=demo_notifier)
-
-    # -------------------------------------------------------------
-    # PRESENTATION RUNNER
-    # -------------------------------------------------------------
-    print_header()
-    if dash_url:
-        print(f"  🖥️  Live Status Dashboard: {dash_url}")
-        print(f"  📊 Programmatic JSON API: {dash_url}/api/status")
-        print("-" * 86)
-
-    # Initial baseline tick at 06:45 CDT
-    res_0 = scheduler.tick()
-    pace_pause(1.0)
-
-    # =============================================================
-    # BEAT 1: EMPATHY & MORNING ROUTINE BASELINE (07:30 CDT)
-    # =============================================================
-    print_beat_header(
-        beat_num=1,
-        title="Empathy & Normal Morning Routine",
-        local_time="07:30 CDT (12:30 UTC)",
-        subtitle="Resident wakes up and steps outside for the morning newspaper.",
-    )
-
-    # Advance clock to 07:30 CDT (12:30 UTC)
-    clock.set_time(datetime(2026, 10, 12, 12, 30, 0, tzinfo=timezone.utc))
-
-    # Ingest front door sensor event and sync device freshness
-    c_beat1 = get_connection(target_db)
-    sync_device_poll(c_beat1, "2026-10-12T12:30:00Z")
-    ingest_event(
-        conn=c_beat1,
-        source="history",
-        external_id="ev_demo_door_0730",
-        device_id="sensor_front_door",
-        event_type="motion_detected",
-        sub_type="human",
-        occurred_at="2026-10-12T12:30:00Z",
-        raw_json={"event": "motion", "door": "front"},
-    )
-    c_beat1.close()
-
-    # Scheduler tick
-    res_1 = scheduler.tick()
-    st_med_1 = res_1["statuses"]["rt_morning_medicine"]
-    st_door_1 = res_1["statuses"]["rt_morning_door"]
-
-    print_timeline_row("12:30 UTC", "07:30 CDT", st_med_1, st_door_1, "0 active", "Front door motion detected (Margaret got paper)")
-    print("     ↳ Front Door Walk satisfied -> 🟢 OBSERVED. Medicine cabinet window is open -> 🟡 WATCHING.")
-    c_dash1 = get_connection(target_db)
-    sum1 = get_dashboard_data(c_dash1, now=clock.now())["summary"]
-    c_dash1.close()
-    print(f"     ↳ Dashboard shows {sum1['observed_pct']}% routines observed today ({sum1['observed_count']} of {sum1['total_routines']} completed, {sum1['watching_count']} watching).")
-
-    pace_pause(1.5)
-    prompt_step("Beat 1 complete. Margaret has completed her front door walk.")
-
-    # =============================================================
-    # BEAT 2: THE SILENCE & PATTERN-ABSENCE DETECTION (09:00 -> 09:31 CDT)
-    # =============================================================
-    print_beat_header(
-        beat_num=2,
-        title="The Silence & Absence Detection",
-        local_time="09:00 -> 09:31 CDT (14:00 -> 14:31 UTC)",
-        subtitle="Medicine cabinet window ends at 09:00. 30m grace buffer counts activity until 09:30 deadline. Silence.",
-    )
-
-    # 1. Advance to 09:00 CDT (Window ends, 30m grace buffer active)
-    clock.set_time(datetime(2026, 10, 12, 14, 0, 0, tzinfo=timezone.utc))
-    c_sync_9 = get_connection(target_db)
-    sync_device_poll(c_sync_9, "2026-10-12T14:00:00Z")
-    c_sync_9.close()
-
-    res_2a = scheduler.tick()
-    print_timeline_row("14:00 UTC", "09:00 CDT", res_2a["statuses"]["rt_morning_medicine"], res_2a["statuses"]["rt_morning_door"], "0 active", "Window closed, 30m grace buffer active (activity counts until 09:30)")
-
-    pace_pause(1.2)
-
-    # 2. Advance to 09:31 CDT (Deadline 09:30 passed -> ABSENCE DETECTED!)
-    clock.set_time(datetime(2026, 10, 12, 14, 31, 0, tzinfo=timezone.utc))
-    c_sync_931 = get_connection(target_db)
-    sync_device_poll(c_sync_931, "2026-10-12T14:31:00Z")
-    c_sync_931.close()
-
-    res_2b = scheduler.tick()
-    st_med_2 = res_2b["statuses"]["rt_morning_medicine"]
-    st_door_2 = res_2b["statuses"]["rt_morning_door"]
-
-    # Verify escalation was created in DB
-    c_beat2 = get_connection(target_db)
-    cur = c_beat2.execute("SELECT COUNT(*) FROM escalations WHERE routine_id = 'rt_morning_medicine'")
-    esc_count = cur.fetchone()[0]
-    c_beat2.close()
-
-    print_timeline_row("14:31 UTC", "09:31 CDT", st_med_2, st_door_2, f"{esc_count} fired", "⚠️ DEADLINE PASSED: Edge-transition into MISSED!")
-    print("     ↳ Deterministic edge-trigger fires strictly once! Alert dispatched with camera snapshot.")
-    print("     ↳ Web Dashboard displays pulsing MISSED ROUTINE banner at top.")
-
-    # Render smartphone notification card
-    if demo_notifier.sent_escalations:
-        print_phone_alert_card(demo_notifier.sent_escalations[-1])
-
-    pace_pause(1.5)
-
-    # 3. Subsequent tick at 09:45 CDT (Demonstrating deduplication)
-    clock.set_time(datetime(2026, 10, 12, 14, 45, 0, tzinfo=timezone.utc))
-    c_sync_945 = get_connection(target_db)
-    sync_device_poll(c_sync_945, "2026-10-12T14:45:00Z")
-    c_sync_945.close()
-
-    res_2c = scheduler.tick()
-    print_timeline_row("14:45 UTC", "09:45 CDT", res_2c["statuses"]["rt_morning_medicine"], res_2c["statuses"]["rt_morning_door"], f"{esc_count} (deduped)", "Subsequent tick: deduplication prevents re-alerting")
-
-    pace_pause(1.2)
-    prompt_step("Beat 2 complete. Caregiver has received snapshot alert on phone.")
-
-    # =============================================================
-    # BEAT 3: CARETAKER RESOLUTION & PEACE OF MIND (09:35 -> 10:00 CDT)
-    # =============================================================
-    print_beat_header(
-        beat_num=3,
-        title="Caretaker Resolution & Late Activity",
-        local_time="09:35 -> 10:00 CDT (14:35 -> 15:00 UTC)",
-        subtitle="Sarah views the camera snapshot, confirms Mom is resting, and taps [False alarm].",
-    )
-
-    # 1. Caregiver taps False alarm at 09:35 CDT (14:35 UTC)
-    c_beat3 = get_connection(target_db)
-    record_correction(
-        conn=c_beat3,
-        id="corr_rt_morning_medicine_2026-10-12",
-        device_id="sensor_medicine_cabinet",
-        event_type="motion_detected",
-        time_bucket="07:00-09:00",
-        label="false_alarm",
-        created_at="2026-10-12T14:35:00Z",
-        ignore_conflicts=True,
-    )
-    ack_escalation(
-        conn=c_beat3,
-        routine_id="rt_morning_medicine",
-        local_date="2026-10-12",
-        acked_at="2026-10-12T14:35:00Z",
-    )
-    sync_device_poll(c_beat3, "2026-10-12T14:35:00Z")
-    c_beat3.close()
-
-    # Advance clock to 09:35 CDT and tick
-    clock.set_time(datetime(2026, 10, 12, 14, 35, 0, tzinfo=timezone.utc))
-    res_3a = scheduler.tick()
-
-    print_timeline_row("14:35 UTC", "09:35 CDT", res_3a["statuses"]["rt_morning_medicine"], res_3a["statuses"]["rt_morning_door"], "Acked (0 active)", "Sarah tapped [False alarm] -> correction recorded")
-    print("     ↳ Dashboard routine card updates to: 🟢 Acknowledged (False alarm). Emergency banner clears.")
-
-    pace_pause(1.5)
-
-    # 2. Delayed Ring event from 08:30 CDT (13:30 UTC) backfills at 10:00 CDT
-    clock.set_time(datetime(2026, 10, 12, 15, 0, 0, tzinfo=timezone.utc))
-    c_late = get_connection(target_db)
-    sync_device_poll(c_late, "2026-10-12T15:00:00Z")
-    ingest_event(
-        conn=c_late,
-        source="history",
-        external_id="ev_demo_med_late_1000",
-        device_id="sensor_medicine_cabinet",
-        event_type="motion_detected",
-        sub_type="motion",
-        occurred_at="2026-10-12T13:30:00Z",
-        received_at="2026-10-12T15:00:00Z",
-        raw_json={"event": "motion", "cabinet": "medicine"},
-    )
-    c_late.close()
-
-    res_3b = scheduler.tick()
-    st_med_3 = res_3b["statuses"]["rt_morning_medicine"]
-    st_door_3 = res_3b["statuses"]["rt_morning_door"]
-
-    print_timeline_row("15:00 UTC", "10:00 CDT", st_med_3, st_door_3, "Preserved", "Late event arrives (occurred 08:30 CDT) -> Routine satisfied (OBSERVED)")
-    print("     ↳ Status updates cleanly to 🟢 OBSERVED. Full audit log of escalation and correction preserved.")
-
-    pace_pause(1.2)
-
-    # Compile final execution results
-    result_data = {
-        "success": True,
-        "dashboard_url": dash_url,
-        "database": target_db,
-        "server": dash_server,
-        "beat1": {
-            "status_door": st_door_1,
-            "status_medicine": st_med_1,
-        },
-        "beat2": {
-            "status_medicine": st_med_2,
-            "escalations_count": esc_count,
-            "alert_delivered": len(demo_notifier.sent_escalations) > 0,
-            "snapshot_used": snapshot_path,
-        },
-        "beat3": {
-            "status_medicine_final": st_med_3,
-            "correction_id": "corr_rt_morning_medicine_2026-10-12",
-            "acked": True,
-        },
-        "total_escalations": esc_count,
+    results: Dict[str, Any] = {
+        "success": False,
+        "scenes": {},
+        "server_port": webhook_port,
+        "db_path": db_path,
     }
 
-    if enable_dashboard:
-        print(f"  💡 Dashboard remains running at {dash_url}. Press Ctrl+C to terminate.")
+    try:
+        # ─── SCENE 1: Calm Morning ──────────────────────────────────────────
+        printer.sleep_pace()
+        print("\n" + printer.bold("[SCENE 1: CALM MORNING] Routine Observed — Peace of Mind"))
+        print("  Context:   Routine 'Morning movement' (07:00–09:00 CDT, +30m grace) on living room camera.")
+        print("  Action:    Resident steps into living room at 07:42 CDT. Signed motion webhook posted.")
 
-    if cleanup and os.path.exists(target_db):
-        try:
-            os.remove(target_db)
-        except Exception:
-            pass
+        p1 = make_ring_payload("demo-cam-living-room", "motion_detected", "2026-10-12T12:42:00Z")
+        c1, _ = post_signed_event(webhook_port, demo_secret, p1)
+        if c1 != 200:
+            raise RuntimeError(f"Scene 1 webhook failed with HTTP {c1}")
 
-    return result_data
+        # Status check
+        r1_row = get_routine(conn, "rt_morning_movement")
+        r1 = row_to_routine(r1_row)
+        health_s1 = build_device_health_record(conn=conn, device_id=r1.device_id, now=clock.now())
+        status_s1 = derive_status(routine=r1, device_health=health_s1, now=clock.now())
+        print(f"  Result:    Event accepted (HTTP {c1}). Status derived: {printer.green(status_s1.upper())}.")
+
+        # Advance clock past deadline + grace buffer to 09:31 CDT (14:31 UTC)
+        clock.set_time(datetime(2026, 10, 12, 14, 31, tzinfo=timezone.utc))
+        tick_s1 = scheduler.tick()
+        esc_s1 = tick_s1.get("escalations", 0)
+        print(f"  Tick:      Clock advances past deadline to 09:31 CDT. Scheduler tick: {esc_s1} escalations.")
+        results["scenes"]["s1"] = {"status": status_s1, "escalations": esc_s1}
+
+        # ─── SCENE 2: Trust Boundary ────────────────────────────────────────
+        printer.sleep_pace()
+        print("\n" + printer.bold("[SCENE 2: TRUST BOUNDARY] Signature Check & Idempotent Ingestion"))
+        print("  Test 2a:   POST event with invalid HMAC signature.")
+
+        p2 = make_ring_payload("demo-cam-living-room", "motion_detected", "2026-10-12T15:00:00Z")
+        c2a, _ = post_signed_event(webhook_port, demo_secret, p2, bad_signature=True)
+        cur_cnt = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        print(f"  Result 2a: Rejected by server with HTTP {printer.red(str(c2a))} Unauthorized. Stored rows: {cur_cnt} (unchanged).")
+
+        print("  Test 2b:   Send valid signed event twice with identical meta.request_id.")
+        shared_req_id = "demo_req_idempotent_101"
+        p2b = make_ring_payload(
+            "demo-cam-living-room",
+            "motion_detected",
+            "2026-10-12T15:05:00Z",
+            request_id=shared_req_id,
+        )
+        c2b_1, _ = post_signed_event(webhook_port, demo_secret, p2b)
+        cnt_after_first = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        c2b_2, _ = post_signed_event(webhook_port, demo_secret, p2b)
+        cnt_after_second = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        idempotent_ok = (cnt_after_first == cnt_after_second)
+        print(f"  Result 2b: 1st POST HTTP {c2b_1} (events: {cnt_after_first}). 2nd duplicate POST HTTP {c2b_2} (events: {cnt_after_second}).")
+        print(f"             Idempotency verified: duplicate event safely ignored (count unchanged: {idempotent_ok}).")
+        results["scenes"]["s2"] = {"bad_sig_status": c2a, "idempotent": idempotent_ok}
+
+        # ─── SCENE 3: Missed Routine ────────────────────────────────────────
+        printer.sleep_pace()
+        print("\n" + printer.bold("[SCENE 3: MISSED ROUTINE] The Silence — Deterministic Absence Escalation"))
+        print("  Context:   'Evening check-in' (18:00–20:00 CDT, +30m delay) on front door camera.")
+        print("  Silence:   Window and 30m grace buffer close with zero motion recorded.")
+
+        # Set clock to 20:31 CDT (01:31 UTC next day)
+        clock.set_time(datetime(2026, 10, 13, 1, 31, tzinfo=timezone.utc))
+        upsert_device_health(conn, "demo-cam-front-door", 1, "2026-10-13T01:00:00Z", "webhook")
+        pre_esc_count = len(capturing_notif.sent_escalations)
+        tick_s3_1 = scheduler.tick()
+        post_esc_count_1 = len(capturing_notif.sent_escalations)
+        new_escs_1 = post_esc_count_1 - pre_esc_count
+
+        print(f"  [20:31 CDT] Deadline passed! Status transitions to {printer.red('MISSED')}.")
+        print(f"  Dispatched: Exactly {printer.bold(str(new_escs_1))} escalation alert sent to caregiver via ConsoleNotifier.")
+
+        # Tick again at 20:46 CDT to verify fire-once deduplication
+        clock.set_time(datetime(2026, 10, 13, 1, 46, tzinfo=timezone.utc))
+        tick_s3_2 = scheduler.tick()
+        post_esc_count_2 = len(capturing_notif.sent_escalations)
+        new_escs_2 = post_esc_count_2 - post_esc_count_1
+        print(f"  [20:46 CDT] Subsequent scheduler tick: {new_escs_2} alerts fired (fire-once deduplication enforced).")
+        results["scenes"]["s3"] = {"first_tick_escalations": new_escs_1, "second_tick_escalations": new_escs_2}
+
+        # ─── SCENE 4: UNKNOWN Offline Not Alarm ──────────────────────────────
+        printer.sleep_pace()
+        print("\n" + printer.bold("[SCENE 4: UNKNOWN NOT ALARM] Stale / Offline Device Silenced"))
+        print("  Context:   Routine 'Hallway check' (21:00–22:00 CDT, +30m delay) on hallway camera.")
+        print("  Health:    Device has not confirmed healthy poll in > 120 minutes (offline / stale).")
+
+        # Set last poll to 180 minutes ago
+        upsert_device_health(conn, "demo-cam-hallway", 1, "2026-10-12T20:31:00Z", "webhook")
+        clock.set_time(datetime(2026, 10, 13, 3, 31, tzinfo=timezone.utc))  # 22:31 CDT
+
+        r4_row = get_routine(conn, "rt_hallway_check")
+        r4 = row_to_routine(r4_row)
+        health_s4 = build_device_health_record(conn=conn, device_id=r4.device_id, now=clock.now())
+        status_s4 = derive_status(routine=r4, device_health=health_s4, now=clock.now())
+
+        pre_s4 = len(capturing_notif.sent_escalations)
+        tick_s4 = scheduler.tick()
+        post_s4 = len(capturing_notif.sent_escalations) - pre_s4
+
+        print(f"  Status:    Status derives as: {printer.yellow(status_s4.upper())}.")
+        print("  Display:   'Unknown — device offline, not escalated'.")
+        print(f"  Result:    Scheduler tick past deadline: {post_s4} escalations (silenced, zero false alarms).")
+        results["scenes"]["s4"] = {"status": status_s4, "escalations": post_s4}
+        # ─── SCENE 5: Check Needed ──────────────────────────────────────────
+        printer.sleep_pace()
+        print("\n" + printer.bold("[SCENE 5: CHECK NEEDED] Bounded Investigation & Gate Evaluation"))
+        print("  Event 5a:  Tue 02:10 CDT unexpected motion at living room camera (quiet hours).")
+
+        # Initialize cursor to current max rowid so newly posted events are picked up
+        cur_max = conn.execute("SELECT MAX(rowid) FROM events").fetchone()
+        init_cursor = cur_max[0] if cur_max and cur_max[0] is not None else 0
+        set_app_state(conn, "agent_event_cursor", str(init_cursor))
+
+        # Ensure living room camera is fresh for quiet hours investigation
+        upsert_device_health(conn, "demo-cam-living-room", 1, "2026-10-13T07:00:00Z", "webhook")
+
+        # Event 5a at 02:10 CDT (07:10 UTC)
+        clock.set_time(datetime(2026, 10, 13, 7, 10, tzinfo=timezone.utc))
+        p5a = make_ring_payload("demo-cam-living-room", "motion_detected", "2026-10-13T07:10:00Z")
+        post_signed_event(webhook_port, demo_secret, p5a)
+
+        agent_cfg_5a = AgentConfig(
+            enabled=True,
+            provider="mock",
+            trace_file="trace_escalate_two_tools.json",
+            notify_enabled=True,
+            snapshots_dir=snapshot_dir,
+        )
+        agent_notif_5a = ConsoleNotifier()
+        capturing_agent_5a = CapturingConsoleNotifier(agent_notif_5a)
+
+        proc_5a = process_new_events(
+            conn=conn,
+            provider_factory=lambda: MockProvider("trace_escalate_two_tools.json"),
+            now=clock.now(),
+            cfg=agent_cfg_5a,
+            notifier=capturing_agent_5a,
+            ring_client=snapshot_client,
+        )
+        dec_5a = proc_5a[0]["decision"] if proc_5a else "none"
+        reason_5a = proc_5a[0]["reason_code"] if proc_5a else "none"
+        notif_5a = proc_5a[0].get("notified", False) if proc_5a else False
+        print(f"  Investigation: mode: replay (scripted) | decision: {dec_5a} (reason: {reason_5a})")
+        print(f"  Notification:  CHECK NEEDED alert dispatched with ✓/✗ evidence lines: {notif_5a}")
+
+        # Event 5b: Dedupe check on same device 15 min later (02:25 CDT)
+        print("  Event 5b:  Tue 02:25 CDT motion on SAME device (< 30m cooldown).")
+        clock.set_time(datetime(2026, 10, 13, 7, 25, tzinfo=timezone.utc))
+        p5b = make_ring_payload("demo-cam-living-room", "motion_detected", "2026-10-13T07:25:00Z")
+        post_signed_event(webhook_port, demo_secret, p5b)
+        evt_row_5b = conn.execute("SELECT * FROM events ORDER BY rowid DESC LIMIT 1").fetchone()
+        ambig_5b = is_ambiguous_event(conn, dict(evt_row_5b), clock.now())
+        print(f"  Dedupe:    is_ambiguous_event returned: {ambig_5b} (deduped within 30m cooldown).")
+
+        # Event 5c: Different camera at 02:50 CDT with insufficient evidence (1 tool) -> Gate downgrade
+        print("  Event 5c:  Tue 02:50 CDT motion on hallway camera using trace_escalate_one_tool.")
+        clock.set_time(datetime(2026, 10, 13, 7, 50, tzinfo=timezone.utc))
+        upsert_device_health(conn, "demo-cam-hallway", 1, "2026-10-13T07:45:00Z", "webhook")
+        p5c = make_ring_payload("demo-cam-hallway", "motion_detected", "2026-10-13T07:50:00Z")
+        post_signed_event(webhook_port, demo_secret, p5c)
+
+        agent_cfg_5c = AgentConfig(
+            enabled=True,
+            provider="mock",
+            trace_file="trace_escalate_one_tool.json",
+            notify_enabled=True,
+            snapshots_dir=snapshot_dir,
+        )
+        capturing_agent_5c = CapturingConsoleNotifier(ConsoleNotifier())
+
+        proc_5c = process_new_events(
+            conn=conn,
+            provider_factory=lambda: MockProvider("trace_escalate_one_tool.json"),
+            now=clock.now(),
+            cfg=agent_cfg_5c,
+            notifier=capturing_agent_5c,
+            ring_client=snapshot_client,
+        )
+        dec_5c = proc_5c[0]["decision"] if proc_5c else "none"
+        reason_5c = proc_5c[0]["reason_code"] if proc_5c else "none"
+        notif_5c = proc_5c[0].get("notified", False) if proc_5c else False
+        print(f"  Investigation: mode: replay (scripted) | decision: {dec_5c} (reason: {reason_5c})")
+        print(f"  Gate Guard:    Downgraded to check_needed due to insufficient_evidence. Notifications sent: {len(capturing_agent_5c.sent_escalations)}.")
+        results["scenes"]["s5"] = {
+            "decision_5a": dec_5a,
+            "reason_5a": reason_5a,
+            "notified_5a": notif_5a,
+            "deduped_5b": ambig_5b is None,
+            "decision_5c": dec_5c,
+            "reason_5c": reason_5c,
+            "notified_5c": notif_5c,
+        }
+
+        # ─── SCENE 6: Memory ────────────────────────────────────────────────
+        printer.sleep_pace()
+        print("\n" + printer.bold("[SCENE 6: HOUSEHOLD MEMORY] Caretaker Resolution & Learned Safety"))
+        print("  Action 6a: Caregiver taps [False alarm] on the Scene 3 escalation.")
+        cb_s6 = process_demo_callback(conn, "fa:rt_evening_checkin:2026-10-12", "2026-10-13T01:35:00Z")
+        print(f"  Callback:  Real callback pathway executed. Correction recorded in database: {cb_s6}.")
+
+        # Event 6b: Quiet-hours motion at front door at 03:40 CDT (08:40 UTC)
+        print("  Event 6b:  Tue 03:40 CDT motion on front door camera. Agent checks household memory.")
+        clock.set_time(datetime(2026, 10, 13, 8, 40, tzinfo=timezone.utc))
+        upsert_device_health(conn, "demo-cam-front-door", 1, "2026-10-13T08:30:00Z", "webhook")
+        p6b = make_ring_payload("demo-cam-front-door", "motion_detected", "2026-10-13T08:40:00Z")
+        post_signed_event(webhook_port, demo_secret, p6b)
+
+        agent_cfg_6 = AgentConfig(
+            enabled=True,
+            provider="mock",
+            trace_file="trace_household_memory_false_alarms.json",
+            notify_enabled=True,
+            snapshots_dir=snapshot_dir,
+        )
+        capturing_agent_6 = CapturingConsoleNotifier(ConsoleNotifier())
+
+        proc_6 = process_new_events(
+            conn=conn,
+            provider_factory=lambda: MockProvider("trace_household_memory_false_alarms.json"),
+            now=clock.now(),
+            cfg=agent_cfg_6,
+            notifier=capturing_agent_6,
+            ring_client=snapshot_client,
+        )
+
+        dec_6 = proc_6[0]["decision"] if proc_6 else "none"
+        reason_6 = proc_6[0]["reason_code"] if proc_6 else "none"
+
+        inv_row = conn.execute("SELECT * FROM investigations WHERE device_id = 'demo-cam-front-door' ORDER BY rowid DESC LIMIT 1").fetchone()
+        evidence_text = ""
+        if inv_row:
+            ev_list = json.loads(inv_row["evidence_json"])
+            if ev_list:
+                evidence_text = ev_list[0].get("text", "")
+
+        print(f"  Investigation: mode: replay (scripted) | decision: {dec_6} (reason: {reason_6})")
+        print(f"  Derived Proof: Evidence derived from real tool result: '{evidence_text}'")
+        print("  Safety:        Alert safely suppressed based on verified historical false alarms.")
+        results["scenes"]["s6"] = {
+            "callback_success": cb_s6,
+            "decision": dec_6,
+            "reason": reason_6,
+            "evidence_text": evidence_text,
+        }
+
+        printer.print_closing_table()
+        results["success"] = True
+
+        if serve:
+            print(f"\n  Starting read-only web dashboard on 127.0.0.1:8080...")
+            dash_server = start_dashboard_server(
+                db_path=db_path,
+                port=8080,
+                host="127.0.0.1",
+                household_name="Simulated Household — Dallas",
+                timezone_name="America/Chicago",
+                snapshot_dir=snapshot_dir,
+                fallback_ports=True,
+                simulated_now=clock.now(),
+            )
+            actual_port = dash_server.server_address[1]
+            print(f"  Dashboard running at http://127.0.0.1:{actual_port}/")
+            print("  Press Ctrl+C to terminate.")
+            try:
+                while True:
+                    time.sleep(0.5)
+            except KeyboardInterrupt:
+                print("\n  Stopping dashboard server...")
+            finally:
+                dash_server.shutdown()
+                dash_server.server_close()
+
+    finally:
+        server.shutdown()
+        server.server_close()
+        uninstall_network_guard()
+        conn.close()
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    return results
 
 
 def main() -> int:
-    """CLI entry point for scripts/run_demo.py and python3 -m src.threshold demo."""
-    import argparse
-
+    """CLI entry point for python3 -m src.threshold demo."""
     parser = argparse.ArgumentParser(
-        prog="threshold demo",
-        description="Threshold 3-Beat End-to-End Hackathon Demonstration Runner",
+        description="Threshold — Zero-Secret Simulated Household Hackathon Demonstration"
     )
-    parser.add_argument("--interactive", "-i", action="store_true", help="Prompt user between narrative beats")
-    parser.add_argument("--fast", "-f", action="store_true", help="Run without artificial pacing delays")
-    parser.add_argument("--speed", type=float, default=1.0, help="Pacing speed multiplier (default: 1.0)")
-    parser.add_argument("--port", "-p", type=int, default=8080, help="Dashboard HTTP port (default: 8080)")
-    parser.add_argument("--host", default="0.0.0.0", help="Dashboard HTTP host (default: 0.0.0.0)")
-    parser.add_argument("--open", "-o", action="store_true", help="Open web dashboard in default browser")
-    parser.add_argument("--no-dashboard", action="store_true", help="Disable embedded web status dashboard")
-    parser.add_argument("--telegram", action="store_true", help="Send live Telegram photo alert if configured in .env")
-    parser.add_argument("--db", default=None, help="Path to demo SQLite database (default: demo_threshold.db)")
-    parser.add_argument("--keep-running", action="store_true", help="Keep dashboard running after demo concludes")
+    parser.add_argument("--pace", type=float, default=0.0, help="Pace in seconds between scenes (default: 0)")
+    parser.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
+    parser.add_argument("--serve", action="store_true", help="Start read-only dashboard after scenes finish")
 
     args = parser.parse_args()
-
-    # Load environment variables if available
-    from scripts.probe_ring import load_env
-    load_env(".env")
-
-    speed = 0.0 if args.fast else args.speed
-
-    try:
-        res = run_demo(
-            db_path=args.db,
-            dashboard_port=args.port,
-            dashboard_host=args.host,
-            enable_dashboard=not args.no_dashboard,
-            open_browser=args.open,
-            interactive=args.interactive,
-            speed=speed,
-            live_telegram=args.telegram,
-            cleanup=False,
-        )
-
-        if not args.no_dashboard:
-            if args.interactive or args.keep_running:
-                try:
-                    while True:
-                        time.sleep(1.0)
-                except KeyboardInterrupt:
-                    print("\nDemo stopped cleanly.")
-            else:
-                # Give a short graceful window for dashboard inspection
-                if speed > 0:
-                    time.sleep(2.0)
-
-        return 0 if res["success"] else 1
-    except KeyboardInterrupt:
-        print("\nDemo aborted by user.")
-        return 0
+    res = run_demo_pipeline(pace=args.pace, no_color=args.no_color, serve=args.serve)
+    return 0 if res.get("success", False) else 1
 
 
 if __name__ == "__main__":

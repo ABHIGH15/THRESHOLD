@@ -82,9 +82,14 @@ class MockProvider:
         step_type = step_def.get("type")
 
         if step_type == "call":
+            args = dict(step_def.get("args", {}))
+            event = state.get("event", {})
+            event_dev = event.get("device_id")
+            if event_dev and "device_id" in args:
+                args["device_id"] = event_dev
             return ToolCall(
                 name=step_def["tool"],
-                args=dict(step_def.get("args", {})),
+                args=args,
                 call_id=step_def.get("call_id", f"call_{step_index + 1}"),
             )
         elif step_type == "final":

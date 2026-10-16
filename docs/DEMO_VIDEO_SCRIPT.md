@@ -2,104 +2,59 @@
 
 > **Project:** Threshold — Pattern-Absence Detection for Elderly Care  
 > **Tagline:** *"Ring tells you when something happens. Threshold tells you when something doesn't."*  
-> **Video Target Length:** 1 minute 58 seconds (Strictly under 2:00 hackathon ceiling)  
-> **Format:** 1080p 60fps (16:9), crisp voiceover, dual-screen display (Dashboard + Terminal + Phone PIP)  
+> **Video Target Length:** Under 2:00 hackathon ceiling  
+> **Format:** 1080p 60fps (16:9), crisp voiceover, two-segment structure: Segment A (REAL) and Segment B (SIMULATED)  
 
 ---
 
-## 1. Production Setup & Screen Layout
+## 1. Segment Overview: REAL vs SIMULATED
 
-### Screen Layout (OBS Studio or Screenflow)
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                              TOP BAR                                   │
-│            THRESHOLD: Zero Cloud Pattern Absence Detection             │
-├──────────────────────────────────────┬─────────────────────────────────┤
-│                                      │                                 │
-│         LEFT 55%: WEB DASHBOARD      │      RIGHT 45%: TERMINAL        │
-│          http://localhost:8080       │    python3 scripts/run_demo.py  │
-│                                      │                                 │
-│  - Routine cards (green/yellow/red)  │  - Interactive 3-beat runner    │
-│  - Emergency pulsing top banner      │  - Step-by-step timeline table  │
-│  - Ring Partner API sandbox status   │  - Clean formatted ASCII boxes  │
-│  - Today's activity & audit log      │                                 │
-│                                      ├─────────────────────────────────┤
-│                                      │   LOWER RIGHT (1:15–1:40 PIP)   │
-│                                      │      PHONE SCREEN MIRROR        │
-│                                      │  - Real Telegram Photo Alert    │
-│                                      │  - [False alarm] [Got it] tap   │
-└──────────────────────────────────────┴─────────────────────────────────┘
-```
+The demonstration video consists of two clearly demarcated segments:
+
+- **Segment A — LIVE Real Ring Sandbox (Labelled REAL):**
+  - Live execution against the official Ring Partner API sandbox (Developer Playground).
+  - Diagnostic output of `python3 -m src.threshold ring-check` verifying live token, device discovery, health polling, and event history.
+  - Live camera snapshot retrieved directly from the Ring sandbox camera (parking lot camera feed with `X-Media-Timestamp`).
+  - No synthetic data; authentic API responses only.
+
+- **Segment B — Simulated Household Demo (Labelled SIMULATED):**
+  - Zero-secret, zero-network end-to-end demonstration (`python3 -m src.threshold demo --no-color`).
+  - Simulated household in Dallas, TX (America/Chicago) with 3 fictional camera routines.
+  - All routines use camera motion detection (no Contact Sensor, Motion Sensor, or Doorbell hardware claims).
+  - Real core pipelines: signature verification, idempotency, ingest, status derivation, fire-once escalation, notifier formatting, agent tools, evidence derivation, deterministic gate, and read-only dashboard.
+  - Agent reasoning is in replay mode (`mode: replay (scripted)` using committed traces, not a live LLM). The system never claims to know what an image visually depicts.
 
 ---
 
-## 2. Shot-by-Shot Storyboard & Script (0:00 – 1:58)
+## 2. Shot-by-Shot Storyboard & Script
 
-### Beat 1: The Human Problem & Baseline (0:00 – 0:32)
+### Segment A: LIVE Real Ring Partner Sandbox (REAL) (0:00 – 0:35)
 
 | Timestamp | Visual Cue | On-Screen Action | Audio Narration (Verbatim) |
 | :--- | :--- | :--- | :--- |
-| **0:00 – 0:10** | Title card fades in from black. Warm dark aesthetic. | Title: **THRESHOLD**<br>*"Pattern-Absence Detection for Elderly Care"* | *"Fifty-three million Americans care for an aging family member. Most live hundreds of miles away. Every day, families live with a quiet anxiety: is Grandma okay today?"* |
-| **0:10 – 0:22** | Cut to dual screen: Terminal + Dashboard. | Terminal runs `python3 scripts/run_demo.py --interactive`. ASCII banner appears. Dashboard opens at `localhost:8080`. | *"Threshold monitors daily routines using the Ring sensors already installed in her home. No new gadgets, no wearable trackers she forgets to charge, and zero cloud bills."* |
-| **0:22 – 0:32** | Dashboard shows 2 routine cards: Front Door & Medicine Cabinet. | 07:30 CDT: Margaret opens the front door for the newspaper. Event arrives $\rightarrow$ Front Door card turns **🟢 OBSERVED**. | *"On a normal morning, Margaret steps outside at 7:30 for the paper. Threshold registers the motion, marks her morning walk Observed, and the family knows her day has started safely."* |
+| **0:00 – 0:10** | Title card fades in from black. | Title: **THRESHOLD**<br>*"Pattern-Absence Detection for Elderly Care"*<br>**Segment A: Live Ring Sandbox (REAL)** | *"Fifty-three million Americans care for an aging family member. Ring tells you when something happens. Threshold listens for when something doesn't."* |
+| **0:10 – 0:22** | Terminal view running `python3 -m src.threshold ring-check`. | Diagnostic check completes against Ring Partner API: token redacted, devices listed, device health confirmed, recent history queried. | *"Here is Threshold running live against the real Ring Partner API sandbox. It polls authenticated device health, monitors motion event streams, and checks connectivity without third-party cloud intermediaries."* |
+| **0:22 – 0:35** | Real snapshot retrieved from Ring sandbox camera. | Image displayed with honest caption: `Most recent camera image, taken [timestamp] ([N] min ago). Not live.` | *"When an alert triggers, Threshold requests the latest camera snapshot directly from Ring. The image and capture timestamp are delivered to the caregiver for human review."* |
 
 ---
 
-### Beat 2: The Silence & Pattern-Absence Detection (0:32 – 1:15)
+### Segment B: Simulated Household Demo (SIMULATED) (0:35 – 1:55)
 
 | Timestamp | Visual Cue | On-Screen Action | Audio Narration (Verbatim) |
 | :--- | :--- | :--- | :--- |
-| **0:32 – 0:45** | Focus on Medicine Cabinet card: **🟡 WATCHING** (Window: 07:00–09:00). | Terminal clock advances past 09:00. Status remains Watching due to the 30-minute grace buffer. | *"Every morning between 7:00 and 9:00, Margaret opens her medicine cabinet. But today... the clock strikes 9:00. The window closes. Threshold doesn't panic — it waits for a thirty-minute grace buffer, during which any activity still satisfies the routine."* |
-| **0:45 – 0:58** | Clock reaches 09:31 CDT. The room remains silent. | Edge transition occurs! Medicine Cabinet card turns **🔴 MISSED**. High-contrast **MISSED ROUTINE** banner pulses at top of dashboard. | *"At 9:31, the grace buffer expires. Silence. Ring tells you when a door opens. Nobody tells you when it didn't. Threshold's deterministic engine detects the absence and edge-triggers an immediate escalation."* |
-| **0:58 – 1:15** | Phone Screen PIP appears over lower right terminal. | Phone vibrates. Real Telegram notification pops up with high-res camera photo and buttons: `[False alarm]` `[Got it]`. | *"The caregiver doesn't get a cold, jarring phone call. Her daughter Sarah gets a quiet photo notification right inside Telegram — the most recent camera image from the sandbox camera. In one glance, Sarah can see if Mom is in bed, sitting in her armchair, or in need of help."* |
+| **0:35 – 0:50** | Terminal runs `python3 -m src.threshold demo`. Banner displayed: `SIMULATED HOUSEHOLD (fictional)`. | **Scene 1: Calm Morning.** Routine 'Morning movement' (07:00–09:00 CDT, +30m grace) on living room camera. Signed motion at 07:42 $\rightarrow$ Status **🟢 OBSERVED**. Tick at 09:31 $\rightarrow$ 0 escalations. | *"In our simulated household, Scene 1 shows a calm morning. Movement in the living room at 7:42 is signed and accepted. The routine derives as Observed, and the 9:31 deadline passes with zero false alerts."* |
+| **0:50 – 1:02** | Terminal shows Scene 2: Trust Boundary. | **Scene 2: Trust Boundary.** Bad HMAC signature $\rightarrow$ HTTP 401 Unauthorized, 0 rows stored. Duplicate request $\rightarrow$ HTTP 200 idempotent, event count unchanged. | *"Scene 2 demonstrates the trust boundary: unauthorized webhooks are rejected with HTTP 401 before parsing, and duplicate deliveries are safely ignored by database idempotency."* |
+| **0:52 – 1:18** | Terminal shows Scene 3: Missed Routine & Fire-Once Escalation. | **Scene 3: Missed Routine.** 'Evening check-in' (18:00–20:00 CDT, +30m delay) on front door camera. Clock reaches 20:31 CDT. Status transitions to **🔴 MISSED**. Exactly 1 escalation dispatched. Subsequent tick at 20:46 fires 0 alerts. | *"In Scene 3, the evening routine window and 30-minute grace period pass in complete silence. Threshold's deterministic scheduler transitions status to Missed, fires exactly one escalation alert, and enforces fire-once deduplication on subsequent ticks."* |
+| **1:18 – 1:30** | Terminal shows Scene 4: UNKNOWN Offline Device Silenced. | **Scene 4: UNKNOWN Not Alarm.** Hallway camera poll is > 120m old. Status derives as **🟡 UNKNOWN**. Display: 'Unknown — device offline, not escalated'. Tick past deadline $\rightarrow$ 0 escalations. | *"In Scene 4, a device offline for more than two hours transitions to Unknown, not Missed. Threshold silences the absence alert, ensuring offline hardware never triggers a false emergency alarm."* |
+| **1:30 – 1:44** | Terminal shows Scene 5: Check Needed & Gate Evaluation. | **Scene 5: Check Needed.** Event 5a: unexpected quiet-hours motion at 02:10 CDT $\rightarrow$ agent tick in replay mode $\rightarrow$ gate cleared $\rightarrow$ CHECK NEEDED notification dispatched with ✓/✗ evidence lines. Event 5b: same device < 30m deduped. Event 5c: 1 tool $\rightarrow$ gate downgrades to check_needed (insufficient_evidence) $\rightarrow$ 0 messages. | *"Scene 5 exercises bounded investigation: unexpected 2:10 AM motion triggers scripted investigation. When two distinct tools succeed and the gate clears, a Check Needed message dispatches with evidence lines. When evidence is insufficient, the gate strictly downgrades without alerting."* |
+| **1:44 – 1:55** | Terminal shows Scene 6: Household Memory & Closing Comparison Table. | **Scene 6: Household Memory.** Caregiver taps 'False alarm' via real callback pathway. Later 03:40 quiet-hours motion queries real household memory $\rightarrow$ 3 false alarms in last 30 days $\rightarrow$ alert safely suppressed. Closing table: REAL vs SIMULATED breakdown. | *"Finally, Scene 6 executes the real callback resolution path. When quiet-hours motion recurs, household memory reveals three recorded false alarms, safely suppressing duplicate panic. Real core logic, transparently demonstrated."* |
 
 ---
 
-### Beat 3: Resolution & Peace of Mind (1:15 – 1:42)
+## 3. Judge Presentation Talking Points & 45-Second Pitch
 
-| Timestamp | Visual Cue | On-Screen Action | Audio Narration (Verbatim) |
-| :--- | :--- | :--- | :--- |
-| **1:15 – 1:28** | Finger taps `[False alarm]` on phone screen. | Callback processes instantly. SQLite records correction. Dashboard emergency banner dismisses; badge updates to **🟢 Acknowledged (False alarm)**. | *"Sarah sees Mom peacefully reading on the sofa — she simply slept in. Sarah taps 'False alarm.' Instantly, the dashboard updates, the emergency alert dismisses, and the system records the correction without false panic."* |
-| **1:28 – 1:42** | At 10:00 CDT, delayed Ring event arrives. | Late event arrives: `motion_detected` at 08:30 CDT backfilled. Routine updates to **🟢 OBSERVED**. Audit trail preserved. | *"And when Margaret's delayed morning activity syncs from Ring event history, Threshold gracefully reconciles it into Observed, preserving the complete audit trail for family peace of mind."* |
-
----
-
-### Beat 4: Architectural Differentiators & Close (1:42 – 1:58)
-
-| Timestamp | Visual Cue | On-Screen Action | Audio Narration (Verbatim) |
-| :--- | :--- | :--- | :--- |
-| **1:42 – 1:52** | Terminal runs `python3 -m unittest discover tests -v`. Green output scrolls: **automated tests passing**. | Architecture slide / scorecard: Zero AWS, Zero Pip dependencies. Runs on your own machine; no Threshold-operated cloud. Data goes only to Ring (the source) and Telegram (alerts). | *"Zero cloud. Zero AWS bills. Zero third-party dependencies — built entirely on Python's standard library and SQLite. Runs on a twenty-dollar Raspberry Pi. Comprehensive automated test suite."* |
-| **1:52 – 1:58** | Closing Title Card: THRESHOLD + GitHub URL. | Subtitle: *"Because the most critical signal of the day is the one that's missing."* | *"Threshold — because the most important signal of the day is the silence. Thank you."* |
-
----
-
-## 3. Judge Presentation Talking Points & 60-Second Pitch
-
-If pitching live at a hackathon booth, deliver this exact 45-second pitch:
-
-> *"Ring tells you when something happens — the door opened, motion detected. But nobody tells you when something **didn't** happen. If your 82-year-old grandmother opens her medicine cabinet every morning at 7:30, and one morning she doesn't — that silence is the most critical signal of her day.
+> *"Ring tells you when something happens — motion detected. But nobody tells you when something **didn't** happen. If an elderly parent usually moves around the house between 7:00 and 9:00 AM, and one morning there is only silence — that absence is the most critical signal of the day.
 > 
-> *Threshold monitors daily routines using existing Ring sensors already in the home. When expected activity doesn't occur, it edge-triggers an escalation and sends the caregiver a snapshot photo from the nearest Ring camera right inside Telegram with two simple buttons: 'False alarm' or 'Got it.'
+> *Threshold monitors daily routines using existing Ring cameras. When expected activity is missing, it edge-triggers a deterministic escalation with fire-once safety, device health verification, and caregiver callback resolution.
 > 
-> *It runs on a Raspberry Pi on the local home network. Zero AWS, zero cloud subscriptions, zero pip dependencies. Runs on your own machine; no Threshold-operated cloud. Data goes only to Ring (the source) and Telegram (alerts). We've verified it live against Ring Partner API sandbox (Developer Playground), captured camera snapshots, and backed it with passing automated tests.
-> 
-> *The sensors were already there. The cameras were already recording. All that was missing was someone listening for the silence."*
-
----
-
-## 4. Judge Q&A Defense & Objection Cheat Sheet
-
-### Q1: "Why did you build this with Zero AWS / Zero Cloud?"
-- **Answer:** *"Elderly care data is deeply intimate: sleep schedules, bathroom visits, medication timing. Families do not want their parent's daily behavioral rhythms uploaded to third-party cloud data lakes or LLM providers. Runs on your own machine; no Threshold-operated cloud. Data goes only to Ring (the source) and Telegram (alerts). Families never pay monthly cloud hosting bills."*
-
-### Q2: "Why standard library only (zero pip dependencies)?"
-- **Answer:** *"A non-technical family member or volunteer setting up an edge device for Grandma cannot debug pip virtualenvs, broken C-extensions, or broken wheels on ARM processors. Threshold runs directly on any machine with Python 3.10+ installed. It simplifies deployment and maintenance."*
-
-### Q3: "Why a deterministic rule engine instead of Machine Learning or LLMs?"
-- **Answer:** *"In life safety and elderly care, determinism and explainability are paramount. If an alert fires, a caregiver needs to know exactly why: 'The window was 7:00 to 9:00, the 30-minute grace buffer expired, and no cabinet event was received.' If a model hallucinates a 68% anomaly probability, nobody knows what that means. Deterministic edge detection provides one alert per missed routine per day."*
-
-### Q4: "What happens if the home internet or Ring camera goes offline?"
-- **Answer:** *"Threshold implements a strict three-state absence model: if Ring device health stops reporting or becomes stale (> 2 hours old), the routine transitions to `UNKNOWN`, NOT `MISSED`. Threshold will NEVER sound a false alarm because Grandma's Wi-Fi router rebooted. When connectivity restores, Threshold backfills event history and catches up automatically."*
-
-### Q5: "What if the camera snapshot fails to download?"
-- **Answer:** *"Threshold enforces a strict 4.0-second timeout on snapshot capture. If a camera is waking from deep sleep or Ring returns a 425 Media Unavailable, Threshold instantly falls back to a clean text-only Telegram alert with the inline buttons. We never delay an emergency alert waiting for an image."*
+> *It runs entirely offline with zero AWS, zero external cloud dependencies, and zero pip packages — pure Python standard library and SQLite. We've verified it live against the real Ring Partner API sandbox and demonstrated it across a fully simulated household."*

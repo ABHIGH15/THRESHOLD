@@ -1207,3 +1207,49 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 
 
 
+
+
+---
+
+### [2026-10-16T14:00:00Z] Task A9 — Zero-Secret Demo Mode (Rewrite) + A8b Gap Closure (COMPLETE)
+
+#### 1. Scope & Execution Overview
+- Delivered complete rewrite of `src/threshold/demo.py` adhering to zero-secret, zero-network, zero-cloud principles.
+- Closed all A8b agent test gaps in `tests/test_agent.py` (committed in `bee743c`).
+- Rewrote `tests/test_demo.py` with comprehensive T1–T6 test suite.
+- Updated `docs/DEMO_VIDEO_SCRIPT.md` to establish honest two-segment video structure (Segment A: LIVE real Ring sandbox, Segment B: SIMULATED household demo).
+- Frozen files (`gate.py`, `status.py`, `triage.py`, `models.py`, `scheduler.py`, `ingest.py`, and existing `notifier.py` functions) verified with zero diff against `a3b749bd4e0c753daa9b4a619e010bafe00dd232`.
+
+#### 2. Architecture & Pipeline Highlights
+1. **Network Guard (`install_network_guard`)**:
+   - Patches `socket.socket.connect` at demo initialization to intercept and block any non-loopback connection with `ConnectionRefusedError`.
+   - Verified: loopback traffic to `127.0.0.1` functions cleanly while external destinations (e.g. `1.1.1.1`) are strictly refused.
+2. **Ephemeral Local Server & Real Signed Webhooks**:
+   - Spawns real `ThreadingHTTPServer` on `127.0.0.1:0` (ephemeral port).
+   - Generates random per-run 32-byte HMAC secret (never logged or printed).
+   - Signs every event using repo's `compute_signature()`.
+3. **Six Deterministic Scenes (America/Chicago timezone)**:
+   - **S1 Calm morning**: Morning movement observed at 07:42 CDT, tick at 09:31 CDT yields 0 alerts.
+   - **S2 Trust boundary**: Corrupted HMAC yields HTTP 401 Unauthorized (0 rows stored); duplicate request yields HTTP 200 idempotent (row count unchanged).
+   - **S3 Missed routine**: Evening check-in silence past 20:30 CDT deadline yields exactly 1 escalation via `ConsoleNotifier`; second tick at 20:46 CDT yields 0 alerts (fire-once deduplication).
+   - **S4 UNKNOWN not alarm**: Hallway camera offline > 120m derives `UNKNOWN`; tick past deadline yields 0 escalations ("Unknown — device offline, not escalated").
+   - **S5 Check needed**: Tue 02:10 CDT unexpected motion triggers agent tick in replay mode; gate clears $\rightarrow$ dispatches 1 CHECK NEEDED message with ✓/✗ evidence lines. Same-device event < 30m is deduped. One-tool event on hallway camera triggers gate downgrade to `check_needed` (`insufficient_evidence`) with 0 notifications.
+   - **S6 Memory**: Caregiver taps [False alarm] on S3 escalation via real callback pathway (`resolve_callback_routine_id` $\rightarrow$ `record_correction` $\rightarrow$ `ack_escalation`). Later 03:40 CDT motion queries real household memory $\rightarrow$ 3 false alarms in last 30 days $\rightarrow$ safely suppressed with evidence derived from real tool result.
+4. **Read-Only Dashboard & Verification**:
+   - `--serve` launches local dashboard on `127.0.0.1:8080` (with port fallback).
+   - Headless Chrome screenshot captured to `evidence/dashboard/demo_check_needed.png`.
+   - APIs `/api/status` and `/api/investigations?limit=5` verified listing investigations with `mode: "replay (scripted)"`.
+
+#### 3. Test Suite Verification
+- `tests/test_demo.py` (T1–T6) passing:
+  - `test_t1_scene_assertions_structured_api`: Verifies all structured scene assertion outputs.
+  - `test_t2_cli_subprocess_smoke`: Subprocess execution verifying exit 0 and required honesty banners.
+  - `test_t3_sentinel_zero_secret_isolation`: Sentinel test in sandbox with fake `.env` and `threshold.json` verifying zero secret leakage.
+  - `test_t4_static_guard_no_forbidden_references`: Asserts no references to "evidence/", "threshold.json", or ".env" in `demo.py`.
+  - `test_t5_network_guard`: Verifies loopback allowed and 1.1.1.1 blocked.
+  - `test_t6_output_determinism`: Verifies byte-identical output across consecutive runs after masking ports/temp paths.
+- **Full Test Suite:** **258 tests passing** in $\approx 50.2$ seconds (`OK`).
+
+#### 4. Status
+- PARTIAL items: None.
+- TODO-VERIFY items: None.

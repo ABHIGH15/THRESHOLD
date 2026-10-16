@@ -11,7 +11,11 @@ import json
 import os
 import sys
 
-from scripts.probe_ring import load_env
+try:
+    from scripts.probe_ring import load_env
+except ImportError:
+    def load_env(path: str = ".env") -> None:
+        pass
 from src.threshold.config import find_config_file, load_config_file, seed_routines_from_config, ThresholdConfig
 from src.threshold.daemon import DaemonConfig, ThresholdDaemon
 from src.threshold.models import Routine
@@ -436,37 +440,20 @@ def run_dashboard_cli(args: argparse.Namespace) -> int:
 
 
 def run_demo_cli(args: argparse.Namespace) -> int:
-    """Execute the end-to-end 3-beat hackathon demonstration."""
-    import time
-    from src.threshold.demo import run_demo
+    """Execute the zero-secret simulated household hackathon demonstration."""
+    from src.threshold.demo import run_demo_pipeline
 
-    load_env(".env")
-    speed = 0.0 if args.fast else args.speed
+    pace = getattr(args, "pace", 0.0)
+    if getattr(args, "fast", False):
+        pace = 0.0
+    no_color = getattr(args, "no_color", False)
+    serve = getattr(args, "serve", False) or getattr(args, "keep_running", False)
+
     try:
-        res = run_demo(
-            db_path=args.db,
-            dashboard_port=args.port,
-            dashboard_host=args.host,
-            enable_dashboard=not args.no_dashboard,
-            open_browser=getattr(args, "open", False),
-            interactive=args.interactive,
-            speed=speed,
-            live_telegram=getattr(args, "telegram", False),
-            cleanup=False,
-        )
-        if not args.no_dashboard:
-            if args.interactive or getattr(args, "keep_running", False):
-                try:
-                    while True:
-                        time.sleep(1.0)
-                except KeyboardInterrupt:
-                    print("\nDemo stopped cleanly.")
-            else:
-                if speed > 0:
-                    time.sleep(1.5)
-        return 0 if res["success"] else 1
+        res = run_demo_pipeline(pace=pace, no_color=no_color, serve=serve)
+        return 0 if res.get("success", False) else 1
     except KeyboardInterrupt:
-        print("\nDemo aborted by user.")
+        print("\nDemo stopped cleanly.")
         return 0
 
 
@@ -528,17 +515,12 @@ def main() -> int:
     # demo
     demo_parser = subparsers.add_parser(
         "demo",
-        help="Run the end-to-end 3-beat interactive or automated hackathon demo",
+        help="Run the zero-secret simulated household hackathon demo",
     )
-    demo_parser.add_argument("--interactive", "-i", action="store_true", help="Prompt user between narrative beats")
-    demo_parser.add_argument("--fast", "-f", action="store_true", help="Run without artificial pacing delays")
-    demo_parser.add_argument("--speed", type=float, default=1.0, help="Pacing speed multiplier (default: 1.0)")
-    demo_parser.add_argument("--port", "-p", type=int, default=8080, help="Dashboard HTTP port (default: 8080)")
-    demo_parser.add_argument("--host", default="0.0.0.0", help="Dashboard HTTP host (default: 0.0.0.0)")
-    demo_parser.add_argument("--open", "-o", action="store_true", help="Open web dashboard in default browser")
-    demo_parser.add_argument("--no-dashboard", action="store_true", help="Disable embedded web status dashboard")
-    demo_parser.add_argument("--telegram", action="store_true", help="Send live Telegram photo alert if configured in .env")
-    demo_parser.add_argument("--db", default=None, help="Path to demo SQLite database (default: demo_threshold.db)")
+    demo_parser.add_argument("--pace", type=float, default=0.0, help="Pace in seconds between scenes (default: 0)")
+    demo_parser.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
+    demo_parser.add_argument("--serve", action="store_true", help="Start read-only dashboard on 127.0.0.1 after scenes finish")
+    demo_parser.add_argument("--fast", "-f", action="store_true", help="Run without pacing delays")
     demo_parser.add_argument("--keep-running", action="store_true", help="Keep dashboard running after demo concludes")
 
     # run (daemon)

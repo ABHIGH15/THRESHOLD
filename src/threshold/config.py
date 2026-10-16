@@ -81,6 +81,7 @@ class AgentConfig:
     notify_enabled: bool = False
     max_seconds_per_tick: float = 25.0
     max_event_age_minutes: int = 120
+    snapshots_dir: str = "snapshots"
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary representation."""
