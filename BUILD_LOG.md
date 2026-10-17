@@ -1298,3 +1298,23 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 - **Network Guard:** `test_t5_network_guard` verified blocking external traffic.
 - **Total Test Suite:** **259 tests passing** in $\approx 50.3$s (`OK`).
 
+### [2026-10-17T15:45:00Z] Task A9c: Demo Claim Fixes and Honesty Hardening
+
+#### 1. Scope & Execution Overview
+- Resolved the final demo claims that were contradicted or unbacked by raw outputs:
+  - Disclosed that no photo attachment was dispatched by `runner.py` (text-only dispatch via `send_message`), avoiding unbacked attachment claims.
+  - Verified dashboard images and JSON APIs with status 200, valid Content-Type, byte length (149 bytes), and sequential IDs 1, 2, 3.
+  - Hardened Chrome console/network error counter with 3-case controls; confirmed 0 errors on real dashboard.
+  - Verified and documented `format_fired_at` vs `ConsoleNotifier` (explaining why real Telegram alerts localize time while console notifier prints UTC).
+  - Added explicit disclosures for simulated device health polls in banner and closing table; softened absence alert claim.
+  - Implemented explicit `.simulated` marker file detection on dashboard, rendering "Simulated placeholder — not a camera image" label.
+  - Synchronized `docs/sample_investigation.json` with `trace_escalate_two_tools.json` and added drift unit test.
+  - Added port collision fallback for `demo --serve` with verified binding to next free port.
+- Preserved strict zero diff across all frozen files (`gate.py`, `status.py`, `triage.py`, `models.py`, `scheduler.py`, `ingest.py`, `notifier.py`, and `runner.py` LOGIC).
+
+#### 2. Verification Summary
+- **Evidence Files:** Saved in `evidence/A9c/` with commands run and raw outputs recorded via `tee`.
+- **Test Suite:** Clean-clone full test suite passes with 260 tests OK.
+- **Frozen Diff:** Zero diff against `a3b749b`.
+
+

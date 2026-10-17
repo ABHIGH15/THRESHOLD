@@ -1732,6 +1732,39 @@ class TestAgentLibrary(unittest.TestCase):
                         f"{os.path.basename(file_path)} violates import guard by importing from {module_name}",
                     )
 
+    def test_sample_investigation_sync(self):
+        """
+        Verify docs/sample_investigation.json stays strictly synchronized
+        with trace_escalate_two_tools.json.
+        """
+        base_dir = os.path.dirname(os.path.dirname(__file__))
+        sample_path = os.path.join(base_dir, "docs", "sample_investigation.json")
+        trace_path = os.path.join(base_dir, "src", "threshold", "agent", "traces", "trace_escalate_two_tools.json")
+
+        self.assertTrue(os.path.exists(sample_path), f"Missing {sample_path}")
+        self.assertTrue(os.path.exists(trace_path), f"Missing {trace_path}")
+
+        with open(sample_path, "r", encoding="utf-8") as f:
+            sample_data = json.load(f)
+        with open(trace_path, "r", encoding="utf-8") as f:
+            trace_data = json.load(f)
+
+        # Find final step recommendation template in trace
+        trace_final = next(s for s in trace_data["steps"] if s["type"] == "final")
+        sample_final = next(s for s in sample_data["steps"] if s["type"] == "final")
+
+        self.assertEqual(
+            sample_final["recommendation"],
+            trace_final["recommendation"],
+            "docs/sample_investigation.json final step recommendation has drifted from trace_escalate_two_tools.json",
+        )
+        self.assertEqual(sample_final["tier"], trace_final["tier"])
+        self.assertIn(
+            "Snapshot requested for caregiver review.",
+            sample_data["investigation"]["recommendation"],
+            "docs/sample_investigation.json investigation recommendation has drifted",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -352,6 +352,7 @@ class DemoPrinter:
         print("  Does not contact emergency services.")
         print("  SIMULATED HOUSEHOLD (fictional) — Dallas, TX (America/Chicago)")
         print("  All devices, events, routines, and clock times in this demo are simulated.")
+        print("  Device health polls:    SIMULATED (written with upsert_device_health, the function the real poller uses)")
         print("  Stack: Python standard library only (no pip dependencies) + SQLite.")
         print("  Zero network calls: all webhooks are signed and posted locally to 127.0.0.1.")
         print("-" * 86)
@@ -370,12 +371,13 @@ class DemoPrinter:
             ("Scheduler loop", "REAL", "Scheduler.tick checks deadlines and transitions"),
             ("Fire-once escalation", "REAL", "One escalation per missed routine per day (scheduler.py:277); reminders while unacknowledged (scheduler.py:318)"),
             ("Alert formatting", "REAL", "ConsoleNotifier renders plain-text caregiver alerts"),
-            ("Agent tool execution", "REAL", "check_routine_status, pull_snapshot, check_household_memory"),
+            ("Agent tool execution", "REAL", "check_routine_status, check_household_memory real; Ring client is fake returning 1x1 placeholder JPEG"),
             ("Evidence derivation", "REAL", "Derives evidence strictly from tool execution results"),
             ("Deterministic gate", "REAL", "Pure function gate enforces evidence & cooldown bars"),
             ("Web Dashboard", "REAL", "Read-only HTTP server with dynamic HTML escaping"),
             ("Household & Resident", "SIMULATED", "Fictional household in Dallas, TX"),
             ("Hardware devices", "SIMULATED", "Fictional device identifiers (e.g. demo-cam-living-room)"),
+            ("Device health polls", "SIMULATED", "Written with upsert_device_health, the function the real poller uses"),
             ("Device events", "SIMULATED", "Synthetic motion events generated for narrative"),
             ("System clock", "SIMULATED", "FakeClock drives time progression across scenes"),
             ("Agent reasoning", "SIMULATED", "Replay mode: committed scripted traces (not a live LLM)"),
@@ -384,6 +386,25 @@ class DemoPrinter:
             status_str = self.green(f"{status:<12}") if status == "REAL" else self.yellow(f"{status:<12}")
             print(f"  {comp:<24}{status_str}  {notes}")
         print("=" * 86)
+
+
+def _sync_demo_snapshots(dest_dir: str) -> None:
+    """Move any snapshots created during demo into the demo temporary snapshot_dir."""
+    if os.path.exists("snapshots"):
+        for fname in os.listdir("snapshots"):
+            if fname.startswith("snapshot_demo-cam-"):
+                src_path = os.path.join("snapshots", fname)
+                dest_path = os.path.join(dest_dir, fname)
+                shutil.copy2(src_path, dest_path)
+                try:
+                    os.remove(src_path)
+                except OSError:
+                    pass
+        try:
+            if not os.listdir("snapshots"):
+                os.rmdir("snapshots")
+        except OSError:
+            pass
 
 
 # ─── Demo Pipeline Execution ──────────────────────────────────────────────────
@@ -411,6 +432,8 @@ def run_demo_pipeline(
     db_path = os.path.join(temp_dir, "demo.db")
     snapshot_dir = os.path.join(temp_dir, "snapshots")
     os.makedirs(snapshot_dir, exist_ok=True)
+    with open(os.path.join(snapshot_dir, ".simulated"), "w") as f:
+        f.write("simulated\n")
 
     demo_secret = secrets.token_hex(32)
 
@@ -676,7 +699,8 @@ def run_demo_pipeline(
         reason_5a = proc_5a[0]["reason_code"] if proc_5a else "none"
         notif_5a = proc_5a[0].get("notified", False) if proc_5a else False
         print(f"  Investigation: mode: replay (scripted) | decision: {dec_5a} (reason: {reason_5a})")
-        print(f"  Notification:  CHECK NEEDED alert dispatched with ✓/✗ evidence lines: {notif_5a}")
+        print(f"  Notification:  CHECK NEEDED alert dispatched with ✓/✗ evidence lines: {notif_5a} (text-only via send_message; no photo attachment dispatched)")
+        _sync_demo_snapshots(snapshot_dir)
 
         # Event 5b: Dedupe check on same device 15 min later (02:25 CDT)
         print("  Event 5b:  Tue 02:25 CDT motion on SAME device (< 30m cooldown).")
@@ -791,7 +815,7 @@ def run_demo_pipeline(
         print(f"  Derived Proof: Evidence derived from real tool result: '{evidence_text}'")
         print(f"  Safety:        Agent evaluated household memory ({db_corr_count} verified false alarms). Gate selected tier '{dec_6}'.")
         print(f"                 Telegram notifications sent: {notif_count_6}. Event recorded on dashboard as 'Check needed'.")
-        print("                 Absence alerts (missed routine monitoring) remain 100% active and untouched.")
+        print("                 Absence alerts (missed routine monitoring) remain unaffected by the agent.")
         results["scenes"]["s6"] = {
             "decision": dec_6,
             "reason": reason_6,
@@ -804,7 +828,7 @@ def run_demo_pipeline(
         results["success"] = True
 
         if serve:
-            print(f"\n  Starting read-only web dashboard on 127.0.0.1:8080...")
+            print(f"\n  Starting read-only web dashboard on 127.0.0.1 (preferred port 8080)...")
             dash_server = start_dashboard_server(
                 db_path=db_path,
                 port=8080,
@@ -831,6 +855,7 @@ def run_demo_pipeline(
         server.shutdown()
         server.server_close()
         uninstall_network_guard()
+        _sync_demo_snapshots(snapshot_dir)
         conn.close()
         shutil.rmtree(temp_dir, ignore_errors=True)
 

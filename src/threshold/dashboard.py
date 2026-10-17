@@ -537,12 +537,18 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
             if os.path.isfile(candidate_path):
                 has_snapshot = True
                 safe_snap_url = f"/snapshots/{html.escape(snapshot_filename)}"
+                is_simulated = os.path.isfile(os.path.join(dash_snapshot_dir, ".simulated"))
+                sim_label_html = (
+                    '<div class="simulated-placeholder-label">Simulated placeholder — not a camera image</div>'
+                    if is_simulated else ""
+                )
                 snapshot_html = f"""
                 <div class="inv-snapshot-box">
                   <a href="{safe_snap_url}" onclick="openSnapshotModal('{safe_snap_url}', 'Camera Snapshot — {inv_dev}'); return false;" title="Click for Fullscreen Preview">
                     <img src="{safe_snap_url}" class="inv-thumb" alt="Camera Snapshot" />
                     <span class="thumb-badge">📷 Click to Expand</span>
                   </a>
+                  {sim_label_html}
                 </div>
                 """
 
@@ -1201,6 +1207,17 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
     .inv-thumb:hover {{
       opacity: 0.9;
     }}
+    .simulated-placeholder-label {{
+      font-size: 0.68rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      background: var(--surface-raised, rgba(0, 0, 0, 0.4));
+      border-top: 1px solid var(--border);
+      padding: 4px 6px;
+      text-align: center;
+      line-height: 1.2;
+      max-width: 160px;
+    }}
     .inv-no-snapshot {{
       font-size: 0.82rem;
       color: var(--text-muted);
@@ -1771,7 +1788,7 @@ def start_dashboard_server(
     Returns the running DashboardServer instance.
     """
     attempt_port = port
-    max_attempts = 5 if (fallback_ports and port != 0) else 1
+    max_attempts = 10 if (fallback_ports and port != 0) else 1
     server = None
 
     for attempt in range(max_attempts):
