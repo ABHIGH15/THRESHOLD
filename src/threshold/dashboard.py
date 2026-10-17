@@ -27,6 +27,10 @@ from typing import Any, Dict, List, Optional
 import urllib.parse
 from zoneinfo import ZoneInfo
 
+from src.threshold.agent.evidence_format import (
+    extract_snapshot_filename,
+    format_evidence_text_for_dashboard,
+)
 from src.threshold.notifier import detect_image_mime
 from src.threshold.scheduler import build_device_health_record, row_to_routine
 from src.threshold.status import (
@@ -503,12 +507,8 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
             if ev.get("tool") == "pull_snapshot" and ev_ok:
                 cited_pull_snapshot_ok = True
                 raw_text = str(ev.get("text", ""))
-                m = re.search(r"saved to\s+(.+?)(?:\s*\(captured at|\.\s*$|$)", raw_text)
-                if m:
-                    full_path = m.group(1).rstrip(".")
-                    snapshot_filename = os.path.basename(full_path)
-                    raw_text = raw_text.replace(full_path, f"snapshots/{snapshot_filename}")
-                ev_text = html.escape(raw_text)
+                snapshot_filename = extract_snapshot_filename(raw_text)
+                ev_text = html.escape(format_evidence_text_for_dashboard(raw_text))
 
             if ev_ok:
                 evidence_lines_html.append(f"""
@@ -1670,11 +1670,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                         for item in ev_list:
                             if isinstance(item, dict) and item.get("tool") == "pull_snapshot":
                                 t = item.get("text", "")
-                                m = re.search(r"saved to\s+(.+?)(?:\s*\(captured at|\.\s*$|$)", t)
-                                if m:
-                                    full_path = m.group(1).rstrip(".")
-                                    bname = os.path.basename(full_path)
-                                    item["text"] = t.replace(full_path, f"snapshots/{bname}")
+                                item["text"] = format_evidence_text_for_dashboard(t)
                     except Exception:
                         ev_list = []
                 inv_item["evidence"] = ev_list

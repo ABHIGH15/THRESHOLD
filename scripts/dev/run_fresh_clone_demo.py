@@ -46,9 +46,12 @@ try:
     print(f"wc -l out.txt: {line_count}")
 
     print("\n=== 3. SEARCHING OUT.TXT FOR REQUIRED PATTERNS ===")
-    for idx, line in enumerate(out_text.splitlines(), 1):
-        if any(pat in line for pat in ["PHOTO", "Fired at", "false alarm(s)"]):
-            print(f"Line {idx}: {line}")
+    patterns_to_check = ["PHOTO", "Fired at", "false alarm(s)", "/var/folders"]
+    for pat in patterns_to_check:
+        matches = [line for line in out_text.splitlines() if pat in line]
+        print(f"Pattern '{pat}': {len(matches)} match(es)")
+        for m in matches:
+            print(f"  {m}")
 
     print("\n=== 4. CHECKING SNAPSHOTS DIRECTORY ===")
     snap_proc = subprocess.run(["ls", "snapshots"], cwd=clone_dir, capture_output=True, text=True)

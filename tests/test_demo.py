@@ -10,6 +10,7 @@ Verifies:
   T6 Determinism test (two runs produce identical masked outputs).
 """
 
+from datetime import datetime, timezone
 from io import StringIO
 import os
 import re
@@ -24,10 +25,13 @@ from unittest.mock import patch
 from src.threshold.demo import (
     FALLBACK_JPEG_BYTES,
     SAMPLE_JPEG_BYTES,
+    CapturingConsoleNotifier,
     install_network_guard,
     run_demo_pipeline,
     uninstall_network_guard,
 )
+from src.threshold.models import DeviceHealthRecord, Routine
+from src.threshold.notifier import ConsoleNotifier, TelegramNotifier
 
 
 class TestThresholdDemo(unittest.TestCase):
@@ -237,6 +241,95 @@ class TestThresholdDemo(unittest.TestCase):
         masked2 = mask_output(out2)
 
         self.assertEqual(masked1, masked2, "Demo outputs differ across identical runs!")
+
+    def test_t7_reminder_drift(self):
+        """T7: Reminder drift test — demo's reminder text strictly matches TelegramNotifier.send_reminder output."""
+        sample_routine = Routine(
+            property_id="prop_1",
+            name="Morning Door",
+            device_id="cam_front",
+            expected_event_type="motion",
+            window_start="07:00",
+            window_end="09:00",
+            timezone="America/Chicago",
+            days=["mon", "tue", "wed", "thu", "fri"],
+            escalation_delay_minutes=30,
+        )
+        sample_routine.routine_id = "rt_drift_check"
+
+        cases = [
+            (
+                "healthy_device",
+                DeviceHealthRecord(
+                    device_id="cam_front",
+                    last_event_at=datetime(2026, 10, 12, 7, 45, tzinfo=timezone.utc),
+                ),
+            ),
+            (
+                "stale_device",
+                DeviceHealthRecord(
+                    device_id="cam_front",
+                    last_event_at=None,
+                ),
+            ),
+            (
+                "no_health_record",
+                None,
+            ),
+        ]
+
+        for case_name, health_rec in cases:
+            with self.subTest(case=case_name):
+                # 1. Capture what TelegramNotifier.send_reminder sends
+                telegram_sent = []
+                fake_telegram = TelegramNotifier(
+                    bot_token="fake_token_for_drift_test",
+                    chat_id="12345678",
+                    ring_client=None,
+                )
+
+                def mock_make_request(action, payload, timeout=10):
+                    telegram_sent.append({"action": action, "payload": payload})
+                    return {"ok": True, "result": {"message_id": 999}}
+
+                fake_telegram._make_request = mock_make_request
+
+                local_date = "2026-10-12"
+                fired_at = "2026-10-12T14:35:00Z"
+                fake_telegram.send_reminder(
+                    routine=sample_routine,
+                    local_date=local_date,
+                    fired_at=fired_at,
+                    device_health=health_rec,
+                )
+                self.assertEqual(len(telegram_sent), 1)
+                self.assertEqual(telegram_sent[0]["action"], "sendMessage")
+                telegram_html = telegram_sent[0]["payload"]["text"]
+
+                # 2. Capture what CapturingConsoleNotifier in demo.py sends
+                console = ConsoleNotifier()
+                capturing = CapturingConsoleNotifier(console)
+                with patch("sys.stdout", new=StringIO()):
+                    capturing.send_reminder(
+                        routine=sample_routine,
+                        local_date=local_date,
+                        fired_at=fired_at,
+                        device_health=health_rec,
+                    )
+
+                self.assertEqual(len(capturing.sent_reminders), 1)
+                demo_entry = capturing.sent_reminders[0]
+
+                # 3. Assert zero drift: raw template text must match byte-for-byte
+                self.assertEqual(
+                    demo_entry["text"],
+                    telegram_html,
+                    f"Reminder text drifted between demo and TelegramNotifier in case '{case_name}'",
+                )
+                self.assertEqual(
+                    demo_entry["clean_text"],
+                    re.sub(r"<[^>]+>", "", telegram_html),
+                )
 
 
 if __name__ == "__main__":

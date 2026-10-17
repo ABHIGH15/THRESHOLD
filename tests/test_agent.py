@@ -17,7 +17,18 @@ from src.threshold.agent.facts import build_gate_facts
 from src.threshold.agent.gate import decide
 from src.threshold.agent.investigate import investigate, run_investigation_and_gate
 from src.threshold.agent.provider import MockProvider
+from src.threshold.agent.evidence_format import (
+    extract_snapshot_filename,
+    format_evidence_text_for_caregiver,
+    format_evidence_text_for_dashboard,
+)
+from src.threshold.agent.runner import (
+    deliver_agent_notification,
+    format_agent_notification_text,
+    process_new_events,
+)
 from src.threshold.agent.schemas import (
+    Evidence,
     Final,
     GateDecision,
     GateFacts,
@@ -34,7 +45,6 @@ from src.threshold.agent.tools import (
     get_threshold_history,
     pull_snapshot,
 )
-from src.threshold.agent.runner import format_agent_notification_text, process_new_events
 from src.threshold.agent.triggers import is_ambiguous_event
 from src.threshold.config import AgentConfig
 from src.threshold.daemon import DaemonConfig, ThresholdDaemon
@@ -2057,6 +2067,253 @@ class TestAgentLibrary(unittest.TestCase):
         status_steps = [s for s in trace if s.get("type") == "result" and s.get("tool") == "check_routine_status"]
         self.assertEqual(len(status_steps), 1)
         self.assertNotIn("data", status_steps[0])
+
+    def test_caregiver_message_no_filesystem_paths(self):
+        """
+        Caregiver notification text never contains machine filesystem paths
+        (/var/folders, /Users, /tmp, snapshots/), while dashboard and DB retain valid references.
+        """
+        raw_snapshot_text = (
+            "Snapshot retrieved successfully for device demo-cam-living-room saved to "
+            "/var/folders/wv/k0r_74955b721867z7t_1l080000gn/T/threshold_demo_xyz/snapshots/"
+            "snapshot_demo-cam-living-room_20261013T071000Z.jpg (captured at 2026-10-13T07:10:00Z)."
+        )
+        inv = Investigation(
+            event_key="evt_path_check",
+            mode="replay",
+            provider_name="mock",
+            steps=2,
+            elapsed_ms=120,
+            tier="check_needed",
+            recommendation="Test recommendation for caregiver path privacy.",
+            evidence=[
+                Evidence(tool="pull_snapshot", call_id="c1", ok=True, text=raw_snapshot_text),
+                Evidence(tool="query_device_health", call_id="c2", ok=True, text="Device demo-cam-living-room is fresh."),
+            ],
+            fallback=False,
+            trace=[],
+        )
+        event = {
+            "device_id": "demo-cam-living-room",
+            "event_type": "motion_detected",
+            "occurred_at": "2026-10-13T07:10:00Z",
+        }
+
+        # 1. Caregiver notification message
+        msg_text = format_agent_notification_text(event, inv, timezone_name="America/Chicago")
+        self.assertNotIn("/var/folders", msg_text)
+        self.assertNotIn("/Users", msg_text)
+        self.assertNotIn("/tmp", msg_text)
+        self.assertNotIn("snapshots/", msg_text)
+        self.assertIn("✓ Snapshot retrieved successfully for device demo-cam-living-room (captured at 2026-10-13T07:10:00Z).", msg_text)
+
+        # 2. Raw evidence in Investigation object is untouched
+        self.assertEqual(inv.evidence[0].text, raw_snapshot_text)
+
+        # 3. Dashboard helpers sanitize to relative snapshot path
+        dash_text = format_evidence_text_for_dashboard(raw_snapshot_text)
+        self.assertIn("snapshots/snapshot_demo-cam-living-room_20261013T071000Z.jpg", dash_text)
+        self.assertNotIn("/var/folders", dash_text)
+        self.assertEqual(
+            extract_snapshot_filename(raw_snapshot_text),
+            "snapshot_demo-cam-living-room_20261013T071000Z.jpg",
+        )
+
+    def test_caption_limit_under_1000_chars_single_message(self):
+        """
+        Captions <= 1000 chars are delivered as a single send_photo with the combined caption.
+        """
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        snap_file = os.path.join(temp_dir.name, "snap.jpg")
+        with open(snap_file, "wb") as f:
+            f.write(b"\xff\xd8\xff\xe0" + b"\x00" * 20)
+
+        inv = Investigation(
+            event_key="evt_short_caption",
+            mode="replay",
+            provider_name="mock",
+            steps=1,
+            elapsed_ms=50,
+            tier="check_needed",
+            recommendation="Brief recommendation.",
+            evidence=[
+                Evidence(tool="pull_snapshot", call_id="c1", ok=True, text="Snapshot retrieved successfully for device cam1."),
+            ],
+            fallback=False,
+            trace=[
+                {
+                    "type": "result",
+                    "tool": "pull_snapshot",
+                    "ok": True,
+                    "data": {"path": snap_file, "captured_at": "2026-10-13T07:10:00Z"},
+                }
+            ],
+        )
+        event = {
+            "device_id": "cam1",
+            "event_type": "motion_detected",
+            "occurred_at": "2026-10-13T07:10:00Z",
+        }
+
+        class MockDualNotifier:
+            def __init__(self):
+                self.sent_photos = []
+                self.sent_messages = []
+
+            def send_photo(self, photo_bytes: bytes, caption: str):
+                self.sent_photos.append({"bytes": photo_bytes, "caption": caption})
+
+            def send_message(self, text: str):
+                self.sent_messages.append(text)
+
+        notifier = MockDualNotifier()
+        now = datetime(2026, 10, 13, 7, 10, tzinfo=timezone.utc)
+        delivered = deliver_agent_notification(
+            notifier=notifier,
+            event=event,
+            investigation=inv,
+            now=now,
+        )
+        self.assertTrue(delivered)
+        self.assertEqual(len(notifier.sent_photos), 1)
+        self.assertEqual(len(notifier.sent_messages), 0)
+        self.assertIn("CHECK NEEDED", notifier.sent_photos[0]["caption"])
+
+    def test_caption_limit_over_1000_chars_dual_delivery(self):
+        """
+        Captions > 1000 chars deliver photo with short prefix caption (<= 200 chars)
+        plus full message text as a separate message.
+        """
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        snap_file = os.path.join(temp_dir.name, "snap.jpg")
+        with open(snap_file, "wb") as f:
+            f.write(b"\xff\xd8\xff\xe0" + b"\x00" * 20)
+
+        long_rec = "A" * 600
+        long_evidence = [
+            Evidence(tool="pull_snapshot", call_id="c1", ok=True, text="Snapshot retrieved successfully for device cam1."),
+            Evidence(tool="query_device_health", call_id="c2", ok=True, text="B" * 300),
+            Evidence(tool="get_recent_ring_events", call_id="c3", ok=True, text="C" * 300),
+        ]
+        inv = Investigation(
+            event_key="evt_long_caption",
+            mode="replay",
+            provider_name="mock",
+            steps=3,
+            elapsed_ms=90,
+            tier="check_needed",
+            recommendation=long_rec,
+            evidence=long_evidence,
+            fallback=False,
+            trace=[
+                {
+                    "type": "result",
+                    "tool": "pull_snapshot",
+                    "ok": True,
+                    "data": {"path": snap_file, "captured_at": "2026-10-13T07:10:00Z"},
+                }
+            ],
+        )
+        event = {
+            "device_id": "cam1",
+            "event_type": "motion_detected",
+            "occurred_at": "2026-10-13T07:10:00Z",
+        }
+
+        class MockDualNotifier:
+            def __init__(self):
+                self.sent_photos = []
+                self.sent_messages = []
+
+            def send_photo(self, photo_bytes: bytes, caption: str):
+                self.sent_photos.append({"bytes": photo_bytes, "caption": caption})
+
+            def send_message(self, text: str):
+                self.sent_messages.append(text)
+
+        notifier = MockDualNotifier()
+        now = datetime(2026, 10, 13, 7, 10, tzinfo=timezone.utc)
+        delivered = deliver_agent_notification(
+            notifier=notifier,
+            event=event,
+            investigation=inv,
+            now=now,
+        )
+        self.assertTrue(delivered)
+        self.assertEqual(len(notifier.sent_photos), 1)
+        self.assertEqual(len(notifier.sent_messages), 1)
+        self.assertLessEqual(len(notifier.sent_photos[0]["caption"]), 200)
+        self.assertIn("CHECK NEEDED", notifier.sent_messages[0])
+        self.assertIn(long_rec, notifier.sent_messages[0])
+
+    def test_caption_limit_raising_notifier_proves_silent_fallback(self):
+        """
+        Prove behavior when send_photo raises if len(caption) > 1024 (mimicking Telegram limits).
+        Dual delivery protects against the silent text-only fallback.
+        """
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        snap_file = os.path.join(temp_dir.name, "snap.jpg")
+        with open(snap_file, "wb") as f:
+            f.write(b"\xff\xd8\xff\xe0" + b"\x00" * 20)
+
+        long_rec = "D" * 600
+        inv = Investigation(
+            event_key="evt_raise_test",
+            mode="replay",
+            provider_name="mock",
+            steps=2,
+            elapsed_ms=80,
+            tier="check_needed",
+            recommendation=long_rec,
+            evidence=[
+                Evidence(tool="pull_snapshot", call_id="c1", ok=True, text="Snapshot retrieved successfully for device cam1."),
+                Evidence(tool="check_routine_status", call_id="c2", ok=True, text="E" * 400),
+            ],
+            fallback=False,
+            trace=[
+                {
+                    "type": "result",
+                    "tool": "pull_snapshot",
+                    "ok": True,
+                    "data": {"path": snap_file, "captured_at": "2026-10-13T07:10:00Z"},
+                }
+            ],
+        )
+        event = {
+            "device_id": "cam1",
+            "event_type": "motion_detected",
+            "occurred_at": "2026-10-13T07:10:00Z",
+        }
+
+        class TelegramStrictPhotoNotifier:
+            def __init__(self):
+                self.sent_photos = []
+                self.sent_messages = []
+
+            def send_photo(self, photo_bytes: bytes, caption: str):
+                if len(caption) > 1024:
+                    raise RuntimeError("Telegram API error: message caption is too long (400 Bad Request)")
+                self.sent_photos.append({"bytes": photo_bytes, "caption": caption})
+
+            def send_message(self, text: str):
+                self.sent_messages.append(text)
+
+        notifier = TelegramStrictPhotoNotifier()
+        now = datetime(2026, 10, 13, 7, 10, tzinfo=timezone.utc)
+        delivered = deliver_agent_notification(
+            notifier=notifier,
+            event=event,
+            investigation=inv,
+            now=now,
+        )
+        self.assertTrue(delivered)
+        # Because caption was > 1000 chars, it sent short prefix caption (<= 200 chars),
+        # so send_photo did NOT raise, and photo was successfully delivered!
+        self.assertEqual(len(notifier.sent_photos), 1)
+        self.assertEqual(len(notifier.sent_messages), 1)
 
 
 if __name__ == "__main__":

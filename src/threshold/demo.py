@@ -216,6 +216,8 @@ class CapturingConsoleNotifier(Notifier):
             "local_date": local_date,
             "fired_at": fired_at,
             "res": res,
+            "text": text,
+            "clean_text": clean_text,
         })
         return res
 

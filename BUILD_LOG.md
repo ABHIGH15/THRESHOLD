@@ -122,7 +122,7 @@ Spec cross-check: EXECUTION_PLAN.md Phase 2 — template matches the spec's arch
 
 ### [2026-09-30T14:29:00Z] Dashboard UI — interactive prototype (created, pending human review)
 Attempted: Built interactive HTML dashboard with four demo scenes (All On Track, Watching, Escalation, Correction).
-File: `dashboard.html`
+File: `dashboard.html` (early prototype, removed in A9e)
 Design: Warm dark charcoal palette, custom CSS tokens (not Tailwind defaults). Dashed-border absence gap as visual hero. Evidence-based investigation panel (✓/✗ list, not confidence scores). Deterministic gate visible. Escalation banner with pulse animation. Correction scene shows false-alarm loop closing.
 Result: PARTIAL — code written, NOT reviewed by the human. The artifact approval mechanism triggered but the user had not seen the actual content.
 Spec cross-check: threshold_spec.md — UI-facing labels (Routine/Check Needed/Escalation), evidence-based agent output, three demo beats, correction loop.
@@ -1337,11 +1337,11 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
   - Updated closing table row "Alert formatting" to cite `format_escalation_text (notifier.py:167)`.
 - **Dashboard Path Leak Hardening (`dashboard.py`)**:
   - Sanitized snapshot paths in both HTML rendering and `/api/investigations` to `snapshots/<basename>`, preventing filesystem path exposure even if stored with spaces or absolute prefixes.
-- **Incident Disclosure & Hygiene (`scripts/dev/`, `dashboard.html`)**:
+- **Incident Disclosure & Hygiene (`scripts/dev/`, `dashboard.html` prototype)**:
   - Documented root cause of `snapshots/snapshot_demo-cam-*` files during A9c (unforwarded `snapshots_dir` in `runner.py:289` defaulting to repo `snapshots/`). Verified zero files remain and confirmed `demo` and `demo --serve` leave 0 files in repo root.
   - Resolved placeholder byte count (149 bytes is the real immutable length since A9; 76 bytes in A9b was an uncomputed narrative typo). Verified JPEG magic bytes (`\xff\xd8`).
   - Moved 12 one-off verification scripts to `scripts/dev/` and added 3-line `scripts/dev/README.md`. Kept `scripts/run_demo.py` as an entry point.
-  - Sanitized `dashboard.html` line 6 to use public CDN for Tailwind CSS, achieving 0 forbidden string matches across tracked files.
+  - Sanitized `dashboard.html` line 6 (early prototype, removed in A9e) to use public CDN for Tailwind CSS, achieving 0 forbidden string matches across tracked files.
 - **Zero Diff on Frozen Paths**:
   - `gate.py`, `status.py`, `triage.py`, `models.py`, `scheduler.py`, `ingest.py`, and `notifier.py` remain strictly untouched (zero diff vs `a3b749b`).
 
@@ -1349,3 +1349,37 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 - **Test Suite:** **265 tests passing** (260 baseline + 5 new photo plumbing tests).
 - **Demo Determinism:** Masked diff is byte-identical across runs.
 - **Network & File Hygiene:** 0 demo files in `snapshots/`, 0 secret leaks, 0 forbidden pattern matches.
+
+### [2026-10-17T20:25:00Z] Task A9e: Caregiver Text Polish, Dead Prototype Removed, Caption Limit, Drift Test
+
+#### 1. Scope & Execution Overview
+- **Dead Prototype Removed (`dashboard.html`)**:
+  - Deleted obsolete root prototype file `dashboard.html` via `git rm dashboard.html`.
+  - Reworded historical mentions in `BUILD_LOG.md` (lines 125, 1340, 1344) so no references are left dangling.
+  - Verified 0 matches for `cdn.tailwindcss` or `antigravity` across all tracked files.
+- **Caregiver-Facing Evidence Text & Privacy (`evidence_format.py`, `runner.py`, `dashboard.py`)**:
+  - Created shared helper module `src/threshold/agent/evidence_format.py` providing:
+    - `format_evidence_text_for_caregiver(text)`: drops developer `saved to <path>` clause entirely, leaving clean caregiver alert text: `Snapshot retrieved successfully for device X (captured at ...)`.
+    - `format_evidence_text_for_dashboard(text)`: replaces internal filesystem paths with sanitized relative `snapshots/<basename>`.
+    - `extract_snapshot_filename(text)`: extracts snapshot filename basename for HTML and API rendering.
+  - Wired into `src/threshold/agent/runner.py` (`format_agent_notification_text`): caregiver alerts never contain machine paths (`/var/folders`, `/Users`, `/tmp`, `snapshots/`).
+  - Wired into `src/threshold/dashboard.py` (both HTML template rendering and `/api/investigations` JSON).
+  - Stored evidence in SQLite DB remains raw and untouched.
+- **Photo Caption Limit Protection (`runner.py`)**:
+  - Measured Scene 5a caption length: 577 characters (under 1024 limit and 1000 threshold).
+  - Computed worst-case 5-evidence investigation caption length: 1554 characters (exceeds 1024).
+  - Implemented dual-delivery in `deliver_agent_notification`: when full caption exceeds 1000 chars, delivers photo with short prefix caption (<= 200 chars) plus full text as a separate message. When <= 1000 chars, delivers standard single message with photo and combined caption.
+  - Added unit tests verifying <= 1000 single delivery, > 1000 dual delivery, and raising notifier exception protection preventing silent text-only alert fallback.
+- **Reminder Drift Test (`tests/test_demo.py`, `demo.py`)**:
+  - Stored `text` and `clean_text` in `CapturingConsoleNotifier.sent_reminders`.
+  - Added `test_t7_reminder_drift` in `tests/test_demo.py` comparing `TelegramNotifier.send_reminder` output against `CapturingConsoleNotifier.send_reminder` across multiple device health scenarios (healthy, stale/offline, None). Verified byte-for-byte template match and clean text match.
+- **Computed Secrets Scan (`scripts/dev/run_secrets_scan.py`)**:
+  - Scanned tracked files at HEAD and full `git log -p --all` history across 7 high-risk credential patterns (do NOT open `.env`). Found 0 secret leaks; 1 test dummy constant `SHARED_SECRET = "test-ring-webhook-secret-do-not-use-in-prod"` in `tests/test_webhook_auth.py:23`.
+  - Computed categorization of code matches: docstrings/comments (32), test fixtures/mocks (145), variable names/parameters (185).
+- **Zero Diff on Frozen Paths**:
+  - `gate.py`, `status.py`, `triage.py`, `models.py`, `scheduler.py`, `ingest.py`, and `notifier.py` remain strictly untouched (zero diff vs `a3b749b`).
+
+#### 2. Verification Summary
+- **Test Suite:** **270 tests passing** (265 baseline + 5 new tests).
+- **Evidence Files:** Saved in `evidence/A9e/` with commands run and raw outputs recorded via `tee`.
+- **Demo Hygiene:** 0 machine path leaks in Scene 5a, 0 leaks in repository root, 0 secret leaks.

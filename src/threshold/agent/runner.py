@@ -12,6 +12,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Union
 from zoneinfo import ZoneInfo
 
+from src.threshold.agent.evidence_format import format_evidence_text_for_caregiver
 from src.threshold.agent.investigate import run_investigation_and_gate
 from src.threshold.agent.provider import MockProvider
 from src.threshold.agent.schemas import Investigation
@@ -56,7 +57,8 @@ def format_agent_notification_text(
     evidence_lines = []
     for item in investigation.evidence:
         mark = "✓" if item.ok else "✗"
-        evidence_lines.append(f"{mark} {item.text}")
+        clean_text = format_evidence_text_for_caregiver(item.text)
+        evidence_lines.append(f"{mark} {clean_text}")
     evidence_block = "\n".join(evidence_lines) if evidence_lines else "None recorded."
 
     mode_label = f"({investigation.mode})"
@@ -120,13 +122,49 @@ def deliver_agent_notification(
             except Exception:
                 pass
         caption_prefix = format_snapshot_caption_prefix(captured_ms, timezone_name, now=now)
-        full_caption = truncate_caption(f"{caption_prefix}\n\n{message_text}", max_chars=1024)
+        full_caption_raw = f"{caption_prefix}\n\n{message_text}"
 
-        try:
-            notifier.send_photo(photo_bytes=photo_bytes, caption=full_caption)
-            delivered = True
-        except Exception as e:
-            logger.warning("send_photo failed for agent alert; falling back to sendMessage: %s", e)
+        if len(full_caption_raw) > 1000:
+            # Over-limit caption branch: deliver photo with short prefix caption (<= 200 chars),
+            # then send full text as a separate message.
+            short_caption = truncate_caption(caption_prefix, max_chars=200)
+            photo_ok = False
+            try:
+                notifier.send_photo(photo_bytes=photo_bytes, caption=short_caption)
+                photo_ok = True
+            except Exception as e:
+                logger.warning("send_photo with short caption failed for agent alert: %s", e)
+
+            # Send full text as separate message
+            text_ok = False
+            if hasattr(notifier, "_make_request") and callable(getattr(notifier, "_make_request")):
+                payload = {
+                    "chat_id": getattr(notifier, "chat_id", ""),
+                    "text": message_text,
+                    "parse_mode": "HTML",
+                }
+                notifier._make_request("sendMessage", payload)
+                text_ok = True
+            elif hasattr(notifier, "send_message") and callable(getattr(notifier, "send_message")):
+                notifier.send_message(message_text)
+                text_ok = True
+            elif hasattr(notifier, "sent") and isinstance(getattr(notifier, "sent"), list):
+                notifier.sent.append({
+                    "type": "agent_check_needed_text",
+                    "text": message_text,
+                    "event": event,
+                })
+                text_ok = True
+
+            delivered = photo_ok or text_ok
+        else:
+            # Standard single-message delivery branch (<= 1000 chars)
+            full_caption = truncate_caption(full_caption_raw, max_chars=1024)
+            try:
+                notifier.send_photo(photo_bytes=photo_bytes, caption=full_caption)
+                delivered = True
+            except Exception as e:
+                logger.warning("send_photo failed for agent alert; falling back to sendMessage: %s", e)
 
     if not delivered:
         if hasattr(notifier, "_make_request") and callable(getattr(notifier, "_make_request")):
