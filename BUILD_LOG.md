@@ -1383,3 +1383,31 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 - **Test Suite:** **270 tests passing** (265 baseline + 5 new tests).
 - **Evidence Files:** Saved in `evidence/A9e/` with commands run and raw outputs recorded via `tee`.
 - **Demo Hygiene:** 0 machine path leaks in Scene 5a, 0 leaks in repository root, 0 secret leaks.
+
+### [2026-10-17T21:10:00Z] Task A10: README, Integration Notes, Platform Preflight, Mechanical Checks
+
+#### 1. Scope & Execution Overview
+- **Step 0 — Carry-Overs (Committed as `A10-0: carry-overs`, `ed5d87d`)**:
+  - `0a`: Verified raw diff against `751655e` for `src/threshold/agent/runner.py`. Confirmed all notification dispatch conditions (`notify_enabled`, `decision == "escalate"`) and decision generation paths remain strictly untouched.
+  - `0b`: Updated `format_evidence_text_for_caregiver` in `src/threshold/agent/evidence_format.py` and `src/threshold/agent/runner.py` to convert UTC ISO timestamps (`captured at 2026-10-13T07:10:00Z`) to household local timezone (`captured 02:10 CDT`). Scene 5a caption prefix (`taken 02:10 CDT`) and evidence lines are now synchronized. Fallback preserved when timezone is unavailable.
+  - `0c`: Recorded Python runtime (`Python 3.14.7`). Handled `ZoneInfoNotFoundError` across demo pipeline (`src/threshold/demo.py`), demo CLI, `ring-check`, and daemon entry (`src/threshold/__main__.py`), printing clean actionable error message: `Timezone data missing: pip install tzdata, or run on macOS/Linux`. Added unit test suite `tests/test_platform.py` patching `ZoneInfo` to verify graceful exit across all 4 entry points.
+  - `0d`: Verified `python3 scripts/run_demo.py` under clean `env -i` environment exits with code 0.
+- **Step 1 — README.md (Committed as `A10: README and integration notes`, `6e500eb`)**:
+  - Structured skimmable documentation for hackathon judges with top 30 lines containing 2-sentence problem definition, 60-second offline demo command, and 4-line summary of Ring APIs used.
+  - Included 10 required sections: Problem & Scope Fence, 60s Demo, Ring API Usage Table, REAL vs SIMULATED Matrix, Mermaid Architecture Flowchart with Core Principles, Bounded Agent Specifications & Frozen Gate, Live Execution (.env matching .env.example & verbatim CLI subcommands), 275 Test Suite Status, Honest Engineering Limitations, and Documentation Links.
+- **Step 2 — Friction Log & Integration Notes (`docs/ring_integration_notes.md`)**:
+  - Authored comprehensive feedback for Ring engineering based solely on primary-source artifacts in `evidence/ring/`, `docs/ring_samples/`, and `BUILD_LOG.md`.
+  - Audited 8 specific candidate items: 303 redirect with 416 missing-media signaling, `at_timestamp=now` 416 behavior, undocumented download response headers (`X-Media-Timestamp`, `Last-Modified`, `X-Media-Origin`), 30-minute Playground token expiry, lack of external webhook push delivery in Playground, sandbox Event History restrictions (`on_demand` only), webhook payload naming discrepancies, and absence of non-camera devices in sandbox.
+  - Redacted all device IDs and account tokens.
+- **Step 3 — Mechanical Validation Script (`scripts/dev/check_readme.py`)**:
+  - Automated mechanical checks: relative Markdown link resolution, script and CLI subcommand validity, environment variable alignment with `.env.example`, and top 30 lines compliance. All passed with exit code 0.
+- **Step 4 — Judge Dry Run (`scripts/dev/judge_dry_run.py`)**:
+  - Automated clone verification: cloned repository into isolated temporary directory, programmatically parsed quick-start command from `README.md`, executed `python3 -m src.threshold demo` under `env -i`, and executed `python3 -m unittest discover -s tests -v`. All commands passed with exit code 0.
+- **Step 5 — Public-Tree Audit**:
+  - Generated full tracking audit of repository files grouped by directory, categorizing each item as KEEP, MOVE to docs/dev, or REMOVE for the public repository. Verified MIT License copyright header for Amit Kumar Gupta.
+
+#### 2. Verification Summary
+- **Evidence Files:** Saved under `evidence/A10/` (`01_runner_diff_751655e.txt` through `09_license_head.txt`).
+- **Test Suite:** **275 tests passing** (270 baseline + 5 new platform preflight tests in `tests/test_platform.py`).
+- **Clean Clone Validation:** Quickstart demo and full unit tests verified in fresh clone under `env -i`.
+- **Frozen Diff Integrity:** `gate.py`, `status.py`, `triage.py`, `models.py`, `scheduler.py`, `ingest.py`, and `notifier.py` remain strictly untouched (zero diff vs `a3b749b`).
