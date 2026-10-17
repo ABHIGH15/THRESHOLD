@@ -16,16 +16,36 @@ import sys
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def get_tracked_files() -> set[str]:
+    try:
+        import subprocess
+        out = subprocess.check_output(["git", "ls-files"], cwd=PROJECT_ROOT, text=True)
+        files = {f.strip() for f in out.splitlines() if f.strip()}
+        # Also include directory prefixes of tracked files
+        dirs = set()
+        for f in files:
+            parts = f.split("/")
+            for i in range(1, len(parts)):
+                dirs.add("/".join(parts[:i]))
+        return files | dirs
+    except Exception:
+        return set()
+
+
 def check_relative_links(readme_content: str) -> list[str]:
     errors = []
+    tracked = get_tracked_files()
     # Match [text](target) but ignore anchors and external URLs
     links = re.findall(r'\[([^\]]+)\]\(([^)]+)\)', readme_content)
     for text, target in links:
         target_clean = target.split("#")[0].strip()
         if not target_clean or target_clean.startswith(("http://", "https://", "mailto:")):
             continue
-        full_path = os.path.join(PROJECT_ROOT, target_clean)
-        if not os.path.exists(full_path):
+        target_norm = os.path.normpath(target_clean)
+        # Check against git-tracked files/dirs
+        if tracked and target_norm not in tracked:
+            errors.append(f"Broken relative link: [{text}]({target}) -> '{target_clean}' is not tracked in git.")
+        elif not os.path.exists(os.path.join(PROJECT_ROOT, target_clean)):
             errors.append(f"Broken relative link: [{text}]({target}) -> '{target_clean}' does not exist on disk.")
     return errors
 
@@ -105,9 +125,10 @@ def check_top_30_lines(readme_content: str) -> list[str]:
 
 
 def main() -> int:
-    readme_path = os.path.join(PROJECT_ROOT, "README.md")
+    target_arg = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "README.md"
+    readme_path = os.path.join(PROJECT_ROOT, target_arg) if not os.path.isabs(target_arg) else target_arg
     if not os.path.exists(readme_path):
-        print(f"FAIL: README.md not found at {readme_path}", file=sys.stderr)
+        print(f"FAIL: Target file not found at {readme_path}", file=sys.stderr)
         return 1
 
     with open(readme_path, "r", encoding="utf-8") as f:

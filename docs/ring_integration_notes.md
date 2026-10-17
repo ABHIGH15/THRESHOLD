@@ -2,7 +2,7 @@
 
 This document compiles integration observations, friction points, and product feedback based on hands-on integration with the Ring Partner API (`api.amazonvision.com`) and the Ring Developer Portal Playground during the October 2026 Hackathon.
 
-Every observation is cited directly from verified response artifacts under `evidence/ring/`, `docs/ring_samples/`, or `BUILD_LOG.md`.
+Every observation is cited directly from verified response artifacts under `docs/ring_samples/` or `BUILD_LOG.md`.
 
 ---
 
@@ -10,14 +10,14 @@ Every observation is cited directly from verified response artifacts under `evid
 
 | # | Topic | Finding / Observation | Evidence File & Date | Status |
 |---|---|---|---|---|
-| 1 | **Snapshot HTTP 303 Redirect** | `POST /v1/devices/{id}/media/image/download` returns HTTP 303 even when no media exists; HTTP 416 occurs only on subsequent GET to download host. | `evidence/ring/c2_case_a_latest_in_range.json` (2026-10-15) | VERIFIED LIVE |
-| 2 | **Snapshot at Current Timestamp** | Requesting `at_timestamp=now` returns HTTP 416 `MEDIA_NOT_FOUND`; snapshots are post-recording extracts, not live camera shutters. | `evidence/ring/c2_case_b_at_timestamp_now.json` (2026-10-15) | VERIFIED LIVE |
-| 3 | **Undocumented Download Headers** | Snapshot download responses carry undocumented media metadata headers (`X-Media-Timestamp`, `Last-Modified`, `X-Media-Origin`). | `evidence/ring/c2_case_a2_latest_in_range_recording.json` (2026-10-15) | VERIFIED LIVE |
-| 4 | **Playground Token Expiry** | Playground OAuth tokens expire after exactly 30 minutes, returning HTTP 401 `Unauthorized` on expiry. | `evidence/ring/FINDINGS.md` (2026-10-12) | VERIFIED LIVE |
-| 5 | **Playground Webhook Delivery** | The Developer Playground does not deliver simulated events to external or local webhook URLs; events appear solely in the browser UI. | `evidence/ring/FINDINGS.md` (2026-10-12) | VERIFIED LIVE |
-| 6 | **Sandbox Event History Types** | Event history in the sandbox contains only `event_type: "on_demand"`; simulated Playground motion does not appear in history queries. | `evidence/ring/event_history_20261012T084125Z.json` (2026-10-12) | VERIFIED LIVE |
+| 1 | **Snapshot HTTP 303 Redirect** | `POST /v1/devices/{id}/media/image/download` returns HTTP 303 even when no media exists; HTTP 416 occurs only on subsequent GET to download host. | `docs/ring_samples/c2_case_a_latest_in_range.json` (2026-10-15) | VERIFIED LIVE |
+| 2 | **Snapshot at Current Timestamp** | Requesting `at_timestamp=now` returns HTTP 416 `MEDIA_NOT_FOUND`; snapshots are post-recording extracts, not live camera shutters. | `docs/ring_samples/c2_case_b_at_timestamp_now.json` (2026-10-15) | VERIFIED LIVE |
+| 3 | **Undocumented Download Headers** | Snapshot download responses carry undocumented media metadata headers (`X-Media-Timestamp`, `Last-Modified`, `X-Media-Origin`). | `docs/ring_samples/c2_case_a2_latest_in_range_recording.json` (2026-10-15) | VERIFIED LIVE |
+| 4 | **Playground Token Expiry** | Playground OAuth tokens expire after exactly 30 minutes, returning HTTP 401 `Unauthorized` on expiry. | `docs/ring_samples/FINDINGS.md` (2026-10-12) | VERIFIED LIVE |
+| 5 | **Playground Webhook Delivery** | The Developer Playground does not deliver simulated events to external or local webhook URLs; events appear solely in the browser UI. | `docs/ring_samples/FINDINGS.md` (2026-10-12) | VERIFIED LIVE |
+| 6 | **Sandbox Event History Types** | Event history in the sandbox contains only `event_type: "on_demand"`; simulated Playground motion does not appear in history queries. | `docs/ring_samples/event_history.json` (2026-10-12) | VERIFIED LIVE |
 | 7 | **Webhook Schema Attribute** | Documented webhook payloads use `data.attributes.sub_type` (e.g. `"human"`), distinct from event history enum naming. | Starter repo documentation (`ring-api-helloworld`) | DOC-VERIFIED (UNVERIFIED on live wire) |
-| 8 | **Non-Camera Devices Untested** | Sandbox account provides only `doorbell_v4` camera devices; contact sensors and smart locks are absent from sandbox. | `docs/ring_samples/list_devices.json` (2026-10-13) | VERIFIED LIVE |
+| 8 | **Non-Camera Devices Untested** | The sandbox account used lists 1 device, doorbell_v4; contact sensors and smart locks are absent from this account. | `docs/ring_samples/list_devices.json` (2026-10-13) | VERIFIED LIVE |
 
 ---
 
@@ -25,14 +25,14 @@ Every observation is cited directly from verified response artifacts under `evid
 
 ### Finding 1: Two-Step 303 Snapshot Flow & 416 Error Signaling
 - **Observation:** Calling `POST https://api.amazonvision.com/v1/devices/{device_id}/media/image/download` returns `HTTP 303 See Other` with a pre-signed `Location` URL (`https://download-ap-northeast-1.prod.phoenix.devices.amazon.dev/v1/download?...`). When no snapshot exists within the requested window, the `POST` still succeeds with `303`, but the subsequent `GET` to the download host fails with `HTTP 416 Requested Range Not Satisfiable` / `MEDIA_NOT_FOUND`.
-- **How Verified:** `evidence/ring/c2_case_a_latest_in_range.json` and `evidence/ring/c2_case_b_at_timestamp_now.json` (2026-10-15).
+- **How Verified:** `docs/ring_samples/c2_case_a_latest_in_range.json` and `docs/ring_samples/c2_case_b_at_timestamp_now.json` (2026-10-15).
 - **Authentication Detail:** The subsequent `GET` to the presigned download URL must be executed **without** the `Authorization: Bearer <token>` header, or the download host rejects the request.
 - **Developer Impact:** Standard HTTP clients following redirects automatically either forward headers or raise errors late. Code must intercept the 303 redirect, strip the auth header, and handle 416 as expected missing media rather than fatal infrastructure failure.
 - **Product Suggestion:** Return HTTP 404 or 416 directly on the `POST` if no media is available in range, avoiding an unnecessary round-trip to the download CDN.
 
 ### Finding 2: Snapshots Are Historical Recording Stills, Not Instant Captures
 - **Observation:** Calling `get_snapshot` with `type: "at_timestamp"` for current time (`now`) consistently fails with HTTP 416. Stills can only be extracted from completed video recordings.
-- **How Verified:** Tested in `evidence/ring/c2_case_b_at_timestamp_now.json` (timestamp `1792036749834` returned 416). Successfully extracted an 88,903 byte JPEG only when targeting an interval covering a past recorded session (`evidence/ring/c2_case_a2_latest_in_range_recording.json`).
+- **How Verified:** Tested in `docs/ring_samples/c2_case_b_at_timestamp_now.json` (timestamp `1792036749834` returned 416). Successfully extracted an 88,903 byte JPEG only when targeting an interval covering a past recorded session (`docs/ring_samples/c2_case_a2_latest_in_range_recording.json`).
 - **Developer Impact:** Applications cannot use the snapshot endpoint as an on-demand real-time camera trigger. The integration must query a retrospective window (`latest_in_range`).
 - **Product Suggestion:** Document clearly in Partner API reference that snapshot generation is tied to completed cloud recordings.
 
@@ -41,26 +41,26 @@ Every observation is cited directly from verified response artifacts under `evid
   - `X-Media-Timestamp`: Millisecond epoch timestamp of the exact video frame captured.
   - `X-Media-Origin`: Origin classification (e.g. `"recording"`).
   - `Last-Modified`: HTTP date string of the recording artifact.
-  - `Content-Encryption`: `"none"` (confirms whether client-side decryption is necessary under TAKE).
-- **How Verified:** `evidence/ring/c2_case_a2_latest_in_range_recording.json` (lines 14–25).
+  - `Content-Encryption`: `"none"` (verified response header in `docs/ring_samples/c2_case_a2_latest_in_range_recording.json`, line 20).
+- **How Verified:** `docs/ring_samples/c2_case_a2_latest_in_range_recording.json` (lines 14–25).
 - **Developer Impact:** These headers allow Threshold to display the exact capture time to caregivers (e.g. `taken 02:10 CDT (2 min ago)`) without guessing or assuming receipt time equals capture time.
 - **Product Suggestion:** Formalize and document `X-Media-Timestamp` and `X-Media-Origin` in the official Ring Partner API documentation.
 
 ### Finding 4: Playground Webhook Ingestion Gap
 - **Observation:** The Ring Developer Portal Playground allows developers to click "Simulate motion event", "Simulate package event", and "Simulate vehicle event", but events are rendered only within the browser console. There is no configuration option to deliver webhook payloads to an external HTTPS webhook URL.
-- **How Verified:** `evidence/ring/FINDINGS.md` (Section 5).
+- **How Verified:** `docs/ring_samples/FINDINGS.md` (Section 5).
 - **Developer Impact:** Developers cannot test real webhook handlers (signature validation, HMAC computation, retry handling) against the Playground sandbox. Developers must either build a polling fallback against `GET /v1/history/...` or construct synthetic webhook simulators.
 - **Product Suggestion:** Add a "Webhook Destination URL" input in the Playground UI with an HMAC signing secret for webhook push testing.
 
 ### Finding 5: Discrepancy Between Event History and Webhook Enums
 - **Observation:** Historical events queried via `GET /v1/history/devices/{device_id}/events` use `attributes.event_type: "on_demand"` or `"motion.human"`. Webhook payloads documented for the Partner API use `data.type: "motion_detected"` with `data.attributes.sub_type: "human"`.
-- **How Verified:** `evidence/ring/event_history_20261012T084125Z.json` vs Ring starter repo webhook schemas.
+- **How Verified:** `docs/ring_samples/event_history.json` vs Ring starter repo webhook schemas.
 - **Developer Impact:** An ingest pipeline processing both webhooks and event history must maintain bidirectional enum normalization tables.
 - **Product Suggestion:** Harmonize event type taxonomy between push webhooks and the Event History API.
 
 ### Finding 6: Non-Camera Devices in Sandbox
-- **Observation:** The sandbox portal populates an account with simulated doorbells/cameras (`doorbell_v4`), but does not provide simulated contact sensors, motion detectors, or alarm keypads.
-- **How Verified:** `docs/ring_samples/list_devices.json` (all items have `kind: "doorbell_v4"`).
+- **Observation:** The sandbox account used lists 1 device, doorbell_v4 (`docs/ring_samples/list_devices.json`); contact sensors, motion detectors, or alarm keypads are absent from this sandbox account.
+- **How Verified:** `docs/ring_samples/list_devices.json` (lists 1 doorbell camera with `attributes.name: "Playground Device"`).
 - **Developer Impact:** Routine monitoring for door sensors or cabinet contact sensors can only be tested using simulated payloads.
 - **Product Suggestion:** Allow developers to instantiate simulated Ring Alarm contact sensors in the Developer Playground.
 

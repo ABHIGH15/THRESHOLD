@@ -1,0 +1,26 @@
+{
+  "label": "Case (a2): latest_in_range (covering Oct 12 recording)",
+  "request_payload": {
+    "type": "latest_in_range",
+    "start_timestamp": 1791811043626,
+    "end_timestamp": 1791818243626
+  },
+  "post_status": 303,
+  "has_303_location": true,
+  "location_sanitized": "https://download-ap-northeast-1.prod.phoenix.devices.amazon.dev/v1/download",
+  "final_bytes": 88903,
+  "magic_bytes": "FF D8 FF FE",
+  "capture_time_indicator": "X-Media-Timestamp: 1791814665389",
+  "get_headers": {
+    "Date": "Thu, 15 Oct 2026 04:01:06 GMT",
+    "Content-Type": "image/jpeg",
+    "Content-Length": "88903",
+    "Connection": "close",
+    "Accept-Ranges": "bytes",
+    "Content-Encryption": "none",
+    "Last-Modified": "Mon, 12 Oct 2026 14:17:45 GMT",
+    "X-Media-Origin": "recording",
+    "X-Media-Timestamp": "1791814665389",
+    "X-Request-Id": "0a3768cb-2f5f-4d39-bdf8-8cb3412d132e"
+  }
+}

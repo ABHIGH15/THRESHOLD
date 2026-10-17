@@ -8,10 +8,10 @@ python3 -m src.threshold demo
 ```
 
 **Ring Partner APIs Used:**
-- **Devices & Health (`GET /v1/devices`, `GET /v1/devices/{id}/status`):** Discovers hardware and tracks online freshness.
-- **Event History (`GET /v1/history/devices/{id}/events`):** Polls recent motion events to verify routine satisfaction.
-- **Image Snapshots (`POST /v1/devices/{id}/media/image/download`):** Fetches JPEG captures via two-step HTTP 303 redirect.
-- **Webhook Ingestion (`POST /webhook`):** Receives Ring v1.1 push events with HMAC-SHA256 signature verification.
+- **Devices & Health (`GET /v1/devices`, `GET /v1/devices/{id}/status`):** Discovers hardware and tracks online freshness (verified live in sandbox).
+- **Event History (`GET /v1/history/devices/{id}/events`):** Polls recent motion events to verify routine satisfaction (verified live in sandbox).
+- **Image Snapshots (`POST /v1/devices/{id}/media/image/download`):** Fetches JPEG captures via two-step HTTP 303 redirect (verified live in sandbox).
+- **Webhook Ingestion (`POST /webhook`):** receiver implemented; verified only with locally signed POSTs, not Ring-delivered (the Playground cannot push webhooks).
 
 > **Scope Fence:** Threshold is a caregiver-support notification tool, not a medical or life-safety emergency device, and does not contact 911 or emergency services.
 > **Disclaimer:** Independent hackathon project. Not affiliated with, endorsed by, or sponsored by Ring or Amazon.
@@ -41,7 +41,7 @@ The demo runs completely offline with zero configuration, zero credentials, and 
 ```bash
 python3 -m src.threshold demo
 ```
-*Tested on macOS and Linux with Python 3.14.7 (`Python 3.14+` recommended).*
+*Tested on macOS, Python 3.14.7. Linux: not yet tested. Windows: untested; needs `pip install tzdata`.*
 
 ### Real Demo Terminal Output (First 25 Lines)
 ```text
@@ -85,17 +85,17 @@ All Ring Partner API interactions are implemented in `src/threshold/ring_client.
 
 | Endpoint | Used For | Code Reference | Live Status |
 |---|---|---|---|
-| `GET /v1/users/me` | Account token verification & account identity check | `scripts/probe_ring.py:75` | VERIFIED LIVE 2026-10-12 (`evidence/ring/user_profile_20261012T084113Z.json`) |
-| `GET /v1/devices` | Discovers hardware devices (cameras/doorbells) for household | `src/threshold/ring_client.py:317` | VERIFIED LIVE 2026-10-12 (`evidence/ring/list_devices_20261012T084122Z.json`) |
-| `GET /v1/devices/{id}/status` | Device health check (`online` boolean, `reported_at` timestamp) | `src/threshold/ring_client.py:326` | VERIFIED LIVE 2026-10-12 (`evidence/ring/device_status_20261012T084126Z.json`) |
-| `GET /v1/devices/{id}/capabilities` | Probing device feature configurations (snapshot, motion zones) | `scripts/probe_ring.py:127` | VERIFIED LIVE 2026-10-12 (`evidence/ring/device_capabilities_20261012T084129Z.json`) |
-| `GET /v1/history/devices/{id}/events` | Ingesting motion event history in poller mode | `src/threshold/ring_client.py:336` | VERIFIED LIVE 2026-10-12 (`evidence/ring/event_history_20261012T084125Z.json`) |
-| `POST /v1/devices/{id}/media/image/download` | Initiating snapshot download via `latest_in_range` (HTTP 303 redirect) | `src/threshold/ring_client.py:352` | VERIFIED LIVE 2026-10-15 (`evidence/ring/c2_case_a2_latest_in_range_recording.json`) |
-| `GET <download_url>` (from 303 `Location`) | Fetching snapshot JPEG bytes (executed **without** Authorization header) | `src/threshold/ring_client.py:377` | VERIFIED LIVE 2026-10-15 (`evidence/ring/c2_case_a2_latest_in_range_recording.jpg`) |
-| `POST /webhook` | Receiving Ring v1.1 push webhook notifications | `src/threshold/server.py:59` | IMPLEMENTED, NOT LIVE-VERIFIED *(Playground cannot push webhooks; poll mode used instead)* |
+| `GET /v1/users/me` | Account token verification & account identity check | `scripts/probe_ring.py::perform_call` | VERIFIED LIVE 2026-10-12 (`docs/ring_samples/user_profile.json`) |
+| `GET /v1/devices` | Discovers hardware devices (cameras/doorbells) for household | `src/threshold/ring_client.py::RingClient.list_devices` | VERIFIED LIVE 2026-10-12 (`docs/ring_samples/list_devices.json`) |
+| `GET /v1/devices/{id}/status` | Device health check (`online` boolean, `reported_at` timestamp) | `src/threshold/ring_client.py::RingClient.get_device_status` | VERIFIED LIVE 2026-10-12 (`docs/ring_samples/device_status.json`) |
+| `GET /v1/devices/{id}/capabilities` | Probing device feature configurations (snapshot, motion zones) | `scripts/probe_ring.py::perform_call` | VERIFIED LIVE 2026-10-12 (`docs/ring_samples/device_capabilities.json`) |
+| `GET /v1/history/devices/{id}/events` | Ingesting motion event history in poller mode | `src/threshold/ring_client.py::RingClient.get_event_history` | VERIFIED LIVE 2026-10-12 (`docs/ring_samples/event_history.json`) |
+| `POST /v1/devices/{id}/media/image/download` | Initiating snapshot download via `latest_in_range` (HTTP 303 redirect) | `src/threshold/ring_client.py::RingClient.get_snapshot` | VERIFIED LIVE 2026-10-15 (`docs/ring_samples/c2_case_a2_latest_in_range_recording.json`) |
+| `GET <download_url>` (from 303 `Location`) | Fetching snapshot JPEG bytes (executed **without** Authorization header) | `src/threshold/ring_client.py::RingClient.get_snapshot` | VERIFIED LIVE 2026-10-15 (`docs/ring_samples/c2_case_a2_latest_in_range_recording.json`) |
+| `POST /webhook` | Receiving Ring v1.1 push webhook notifications | `src/threshold/server.py::WebhookHandler.do_POST` | IMPLEMENTED, NOT LIVE-VERIFIED *(receiver implemented; verified only with locally signed POSTs; Playground cannot push webhooks)* |
 | `POST /v1/devices/{id}/media/streaming/whep/sessions` | Live WebRTC/WHEP media streaming session | N/A (Observed in portal UI) | NOT USED *(Threshold monitors routine state, not live surveillance)* |
 
-*Note: Live verification was performed exclusively against camera devices (`doorbell_v4`). Non-camera Ring device types (e.g., contact sensors, smart locks) are untested in the sandbox.*
+*Note: The sandbox account used lists 1 device, doorbell_v4 (`docs/ring_samples/list_devices.json`). Non-camera Ring device types (e.g., contact sensors, smart locks) are untested in the sandbox.*
 
 ---
 
@@ -103,25 +103,25 @@ All Ring Partner API interactions are implemented in `src/threshold/ring_client.
 
 Threshold explicitly separates production logic from simulated test scenarios:
 
-| Component | Status | Implementation Notes | Verified Against Real Ring Sandbox |
+| Component | Status | Implementation Notes | Verified Against Real Ring Sandbox / Tests |
 |---|---|---|---|
-| Signature verification | REAL | HMAC-SHA256 verified before JSON parse (401 on bad signature) | Implemented per Ring v1.1 spec; sandbox cannot push webhooks |
-| Idempotency | REAL | SQLite UNIQUE constraint on `(source, external_id)` | Verified locally with signed duplicate requests |
-| Webhook ingestion | REAL | `ingest_event` parses schema and normalizes types | Webhook payload schema verified against sandbox documentation |
-| Status derivation | REAL | `derive_status` evaluates window + grace period | Deterministic offline logic; verified across unit tests |
-| Scheduler loop | REAL | `Scheduler.tick` checks deadlines and transitions | Deterministic offline logic; verified across unit tests |
-| Fire-once escalation | REAL | One escalation per missed routine per day (`scheduler.py:277`); reminders while unacknowledged (`scheduler.py:318`) | Deterministic offline logic; verified across unit tests |
-| Alert formatting | REAL | Rendered through `format_escalation_text` (`notifier.py:167`) matching Telegram alerts | Telegram HTML parsing & delivery verified with test harness |
-| Agent tool execution | REAL | `check_routine_status`, `check_household_memory` real; demo Ring client returns placeholder JPEG | Tool definitions execute real `RingClient` methods live-verified against sandbox |
-| Evidence derivation | REAL | Derives evidence strictly from tool execution results | Offline logic; verified with 53 agent unit tests |
-| Deterministic gate | REAL | Pure function gate enforces evidence & cooldown bars | Offline logic; verified with unit tests (frozen `gate.py`) |
-| Web Dashboard | REAL | Read-only HTTP server with dynamic HTML escaping | Verified in browser; loopback socket binding |
-| Ring API Client (`ring_client.py`) | REAL | Polls devices, status, event history, snapshots via 303 redirect | YES — verified live against Playground (`evidence/ring/`) |
+| Signature verification | REAL | HMAC-SHA256 verified before JSON parse (401 on bad signature) in `src/threshold/server.py::WebhookHandler.do_POST` | Verified locally with signed POSTs (`tests.test_webhook_auth.TestSignatureVerification.test_valid_signature_passes`) |
+| Idempotency | REAL | SQLite schema constraint `PRIMARY KEY (source, external_id)` in `src/threshold/store.py`; external ID mapped via `external_id = meta.get("request_id") or data.get("id") or "missing_id"` in `src/threshold/server.py::WebhookHandler.do_POST` | Verified locally with duplicate requests (`tests.test_server.TestWebhookServer.test_replay_attack_duplicate_delivery_one_row`) |
+| Webhook ingestion | REAL | `ingest_event` parses schema and normalizes types (`src/threshold/ingest.py::ingest_event`) | Verified against Ring v1.1 documentation with signed test requests (`tests.test_ingest.TestIngestPipeline.test_matching_event_advances_last_satisfied_at`) |
+| Status derivation | REAL | `derive_status` evaluates window + grace period (`src/threshold/status.py::derive_status`) | Deterministic offline logic (`tests.test_triage.TestDerivedStatus.test_watching_within_window`) |
+| Scheduler loop | REAL | `Scheduler.tick` checks deadlines and transitions (`src/threshold/scheduler.py::Scheduler.tick`) | Deterministic offline logic (`tests.test_scheduler.TestSchedulerAbsenceEngine.test_five_consecutive_ticks_past_miss_exactly_one_escalation_row`) |
+| Fire-once escalation | REAL | One escalation per missed routine per day (`src/threshold/scheduler.py::Scheduler.tick`); reminders while unacknowledged | Deterministic offline logic (`tests.test_scheduler.TestSchedulerAbsenceEngine.test_five_consecutive_ticks_past_miss_exactly_one_escalation_row`) |
+| Alert formatting | REAL | Rendered through `format_escalation_text` (`src/threshold/notifier.py::format_escalation_text`) matching Telegram production alerts | Verified across unit tests (`tests.test_notifier.TestNotifierSystem.test_console_notifier_message_content_and_phone_call_disclaimer`) |
+| Agent tool execution | REAL | `check_routine_status`, `check_household_memory` real; demo Ring client returns placeholder JPEG (`src/threshold/agent/tools.py`) | Tool execution verified (`tests.test_agent.TestAgentLibrary.test_tool_check_routine_status_success_and_bad_args`) |
+| Evidence derivation | REAL | Derives evidence strictly from tool execution results (`src/threshold/agent/investigate.py::run_investigation_and_gate`) | Offline logic verified (`tests.test_agent.TestAgentLibrary.test_final_citing_non_existent_call_id_keeps_no_phantom_evidence`) |
+| Deterministic gate | REAL | Pure function gate enforces evidence & cooldown bars (`src/threshold/agent/gate.py::decide`) | Offline logic verified (`tests.test_agent.TestAgentLibrary.test_gate_table_driven_all_conditions`) |
+| Web Dashboard | REAL | Read-only HTTP server with dynamic HTML escaping (`src/threshold/dashboard.py::render_dashboard_html`) | Verified in browser and unit tests (`tests.test_dashboard.TestDashboardSystem.test_render_dashboard_html_contains_critical_elements`) |
+| Ring API Client (`ring_client.py`) | REAL | Polls devices, status, event history, snapshots via 303 redirect (`src/threshold/ring_client.py::RingClient`) | YES — verified live against Playground (`docs/ring_samples/`); tested in `tests.test_ring_client.TestRingClient.test_list_devices_request_shape` |
 | Household & Resident | SIMULATED | Fictional household in Dallas, TX | N/A (simulated scenario) |
-| Hardware devices | SIMULATED | Fictional device identifiers (e.g. `demo-cam-living-room`) | Live `ava1.ring.device.*` devices verified in `evidence/ring/` |
-| Device health polls | SIMULATED | Written with `upsert_device_health`, the function the real poller uses | Real poller writes same schema from `GET /v1/devices/{id}/status` |
-| Device events | SIMULATED | Synthetic motion events generated for narrative | Real events verified from `GET /v1/history/devices/{id}/events` |
-| System clock | SIMULATED | `FakeClock` drives time progression across scenes | Real daemon uses system UTC clock |
+| Hardware devices | SIMULATED | Fictional device identifiers (e.g. `demo-cam-living-room`) | Live device verified in `docs/ring_samples/list_devices.json` |
+| Device health polls | SIMULATED | Written with `upsert_device_health`, the function the real poller uses (`src/threshold/store.py::upsert_device_health`) | Real poller writes same schema from `GET /v1/devices/{id}/status` |
+| Device events | SIMULATED | Synthetic motion events generated for narrative | Real events verified from `docs/ring_samples/event_history.json` (`attributes.event_type: "on_demand"`) |
+| System clock | SIMULATED | `FakeClock` drives time progression across scenes (`src/threshold/scheduler.py::FakeClock`) | Real daemon uses system UTC clock |
 | Agent reasoning | SIMULATED | Replay mode: committed scripted traces (not a live LLM) | Default shipped mode; no live model calls |
 
 ---
@@ -187,17 +187,23 @@ When unexpected motion occurs outside routine windows (e.g. 02:10 AM quiet hours
   4. `check_household_memory`: Checks past false alarms and caretaker corrections.
   5. `pull_snapshot`: Downloads latest image capture via Ring Client.
 
-### The Deterministic Escalation Gate (`src/threshold/agent/gate.py`)
+### The Deterministic Escalation Gate (`src/threshold/agent/gate.py::decide`)
 Model recommendations are never trusted blindly. The final verdict is determined by a frozen, pure mathematical gate:
-- **Evidence Bar:** Requires $\ge 2$ distinct successful tool executions.
-- **Cooldown Bar:** Minimum 30 minutes between alerts for the same device.
-- **Velocity Limit:** Maximum 2 agent escalations per 6 hours.
+- **Evidence Bar:** Requires $\ge 2$ distinct successful tool executions (`tests.test_agent.TestAgentLibrary.test_gate_table_driven_all_conditions`).
+- **Cooldown Bar:** The 30-minute notification cooldown (`src/threshold/agent/gate.py::decide`) is **global across the household**, computed in `src/threshold/agent/facts.py::build_gate_facts` from the latest notification timestamp across all routines and investigations:
+  ```sql
+  SELECT MAX(notified_at) FROM escalations WHERE notified_at IS NOT NULL
+  SELECT MAX(notified_at) FROM investigations WHERE notified_at IS NOT NULL
+  ```
+  *(This is distinct from the per-device investigation trigger deduplication in `src/threshold/agent/triggers.py::is_ambiguous_event`, which queries `SELECT 1 FROM investigations WHERE device_id = ? AND created_at >= ? LIMIT 1`).* Tested in `tests.test_agent.TestAgentLibrary.test_gate_table_driven_all_conditions`.
+- **Velocity Limit:** Maximum 2 agent escalations per 6 hours (`tests.test_agent.TestAgentLibrary.test_gate_table_driven_all_conditions`).
+- **Delivery Hardening:** Over-limit (>1000 char) alerts send a photo with a short prefix caption followed by a full text message. If text delivery fails, it falls through to fallback text delivery, and `notified_at` is recorded in SQLite only on confirmed text delivery (`tests.test_agent.TestAgentLibrary.test_over_limit_delivery_combos_and_notified_at`).
 - If any check fails, the verdict is downgraded to `check_needed` without push alert.
 
 ### Shipped Provider Modes
-- **Default Shipped Mode:** `mock` (`MockProvider`). Replays deterministic, committed scripted traces (`traces/*.json`) labeled `"replay (scripted)"` everywhere.
+- **Default Shipped Mode:** `mock` (`MockProvider`). Replays deterministic, committed scripted traces (`traces/*.json`) labeled `"replay (scripted)"` everywhere (`tests.test_agent.TestAgentLibrary.test_mock_provider_deterministic_replay`).
 - **Live LLM Providers:** No live cloud LLM is shipped by default. Provider stubs (`anthropic`, `openai`) exist in configuration validation but raise `ValueError("not implemented yet")`.
-- **Data Privacy:** In the default `mock` mode, **zero data leaves your machine**. All tool executions and traces operate locally.
+- **Data Privacy:** In the default `mock` mode, **zero data leaves your machine**. All tool executions and traces operate locally (`tests.test_agent.TestAgentLibrary.test_mock_provider_deterministic_replay`).
 
 ---
 
@@ -273,15 +279,15 @@ python3 -m unittest discover -s tests -v
 ## 9. Known Limitations
 
 In the interest of complete engineering honesty:
-1. **Sandbox-Only Live Verification:** Live testing was conducted exclusively in the official Ring Developer Portal Playground. Behavior on production Ring hardware in physical residences remains unverified.
-2. **Poller Mode Default:** The Ring Developer Playground cannot push webhooks to external URLs. Threshold defaults to polling `GET /v1/history/devices/{id}/events`.
-3. **Snapshots Are Historical Recordings:** Ring's `media/image/download` endpoint extracts stills from completed cloud video recordings; it does not trigger an instantaneous camera shutter.
+1. **Sandbox-Only Live Verification:** Live testing was conducted exclusively in the official Ring Developer Portal Playground (`docs/ring_samples/`). The sandbox account used lists 1 device, doorbell_v4 (`docs/ring_samples/list_devices.json`). Behavior on production Ring hardware in physical residences remains unverified.
+2. **Poller Mode Default:** The Ring Developer Playground cannot push webhooks to external URLs (verified in `docs/ring_samples/FINDINGS.md`). Threshold defaults to polling `GET /v1/history/devices/{id}/events` (`src/threshold/ring_client.py::RingClient.get_event_history`). Webhook ingestion is implemented and tested with locally signed POSTs only.
+3. **Snapshots Are Historical Recordings:** Ring's `media/image/download` endpoint extracts stills from completed cloud video recordings; it does not trigger an instantaneous camera shutter (`docs/ring_samples/c2_case_b_at_timestamp_now.json`).
 4. **Household Memory Heuristic:** Caretaker false-alarm feedback is used as a loose proxy for noisy devices and lowers push alert velocity; events remain visible on the dashboard.
 5. **Replay Agent:** The shipped agent replays scripted step traces and does not perform dynamic natural-language reasoning over event context.
 6. **Single Household / Single Chat:** Current implementation supports a single household database and a single caregiver Telegram chat destination.
 7. **Unauthenticated Loopback Dashboard:** The web status dashboard is designed for local observation (`127.0.0.1`) and does not provide session authentication.
-8. **Timezone & DST Scope:** Unit tests verify standard transitions (e.g. America/Chicago CDT/CST and midnight-crossing windows); arbitrary international boundary changes are untested.
-9. **macOS / Linux Tested:** Tested on macOS and Linux. Windows requires `pip install tzdata` for Python `zoneinfo` support.
+8. **Timezone & DST Scope:** Unit tests verify standard transitions (e.g. America/Chicago CDT/CST and midnight-crossing windows; `tests.test_scheduler.TestSchedulerAbsenceEngine.test_us_fallback_dst_boundary`); arbitrary international boundary changes are untested.
+9. **Platform Testing:** Tested on macOS, Python 3.14.7 (`tests.test_platform.TestPlatformPreflight.test_demo_pipeline_zoneinfo_not_found_handling`). Linux: not yet tested. Windows: untested; needs `pip install tzdata` for Python `zoneinfo` support.
 10. **Simulated Household Data:** The Dallas household, devices, and motion timestamps in the demo are fictional scenarios for presentation purposes.
 
 ---

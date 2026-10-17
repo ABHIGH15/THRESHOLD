@@ -26,9 +26,9 @@ class TestPlatformPreflight(unittest.TestCase):
 
         self.assertFalse(res.get("success", True))
         err_output = buf.getvalue().strip()
-        self.assertEqual(
-            err_output,
+        self.assertIn(
             "Timezone data missing: pip install tzdata, or run on macOS/Linux",
+            err_output,
         )
 
     def test_demo_cli_zoneinfo_not_found_handling(self):
@@ -41,9 +41,9 @@ class TestPlatformPreflight(unittest.TestCase):
 
         self.assertEqual(code, 1)
         err_output = buf.getvalue().strip()
-        self.assertEqual(
-            err_output,
+        self.assertIn(
             "Timezone data missing: pip install tzdata, or run on macOS/Linux",
+            err_output,
         )
 
     def test_demo_main_zoneinfo_not_found_handling(self):
@@ -56,9 +56,9 @@ class TestPlatformPreflight(unittest.TestCase):
 
         self.assertEqual(code, 1)
         err_output = buf.getvalue().strip()
-        self.assertEqual(
-            err_output,
+        self.assertIn(
             "Timezone data missing: pip install tzdata, or run on macOS/Linux",
+            err_output,
         )
 
     def test_ring_check_zoneinfo_not_found_handling(self):

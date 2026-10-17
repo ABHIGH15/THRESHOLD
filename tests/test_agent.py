@@ -62,6 +62,7 @@ from src.threshold.store import (
     save_investigation,
     save_routine,
     set_app_state,
+    to_iso_timestamp,
     upsert_device_health,
 )
 
@@ -2252,7 +2253,7 @@ class TestAgentLibrary(unittest.TestCase):
         self.assertIn("CHECK NEEDED", notifier.sent_messages[0])
         self.assertIn(long_rec, notifier.sent_messages[0])
 
-    def test_caption_limit_raising_notifier_proves_silent_fallback(self):
+    def test_caption_limit_strict_photo_length_succeeds_via_dual_delivery(self):
         """
         Prove behavior when send_photo raises if len(caption) > 1024 (mimicking Telegram limits).
         Dual delivery protects against the silent text-only fallback.
@@ -2319,6 +2320,124 @@ class TestAgentLibrary(unittest.TestCase):
         self.assertEqual(len(notifier.sent_photos), 1)
         self.assertEqual(len(notifier.sent_messages), 1)
 
+    def test_over_limit_delivery_combos_and_notified_at(self):
+        """
+        Test all four combinations (photo ok/fail × text ok/fail) on over-limit (>1000 chars) alerts.
+        Assert delivered boolean, messages sent, and verify that notified_at is NOT set when delivered is False.
+        """
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        snap_file = os.path.join(temp_dir.name, "snap.jpg")
+        with open(snap_file, "wb") as f:
+            f.write(b"\xff\xd8\xff\xe0" + b"\x00" * 20)
+
+        class ComboNotifier:
+            def __init__(self, photo_ok: bool, text_ok: bool):
+                self.photo_ok = photo_ok
+                self.text_ok = text_ok
+                self.chat_id = "test_chat_combo"
+                self.sent_photos = []
+                self.sent_messages = []
+
+            def send_photo(self, photo_bytes: bytes, caption: str):
+                if not self.photo_ok:
+                    raise RuntimeError("Telegram API request to sendPhoto failed: photo upload error")
+                self.sent_photos.append({"bytes": photo_bytes, "caption": caption})
+
+            def _make_request(self, endpoint: str, payload: dict):
+                if endpoint == "sendMessage":
+                    if not self.text_ok:
+                        raise RuntimeError("Telegram API request to sendMessage failed: 400 Bad Request")
+                    self.sent_messages.append(payload.get("text", ""))
+                    return {"ok": True, "result": {"message_id": 1234}}
+                raise NotImplementedError(endpoint)
+
+        now = datetime(2026, 10, 13, 7, 10, tzinfo=timezone.utc)
+        long_rec = "C" * 600
+
+        combos = [
+            # (photo_ok, text_ok, expected_delivered, exp_photos, exp_texts)
+            (True, True, True, 1, 1),
+            (True, False, False, 1, 0),
+            (False, True, True, 0, 1),
+            (False, False, False, 0, 0),
+        ]
+
+        for photo_ok, text_ok, expected_deliv, exp_p, exp_t in combos:
+            with self.subTest(photo_ok=photo_ok, text_ok=text_ok):
+                conn = init_db(":memory:")
+                event_key = f"evt_combo_{photo_ok}_{text_ok}"
+                inv = Investigation(
+                    event_key=event_key,
+                    mode="replay",
+                    provider_name="mock",
+                    steps=2,
+                    elapsed_ms=50,
+                    tier="escalate",
+                    recommendation=long_rec,
+                    evidence=[
+                        Evidence(tool="pull_snapshot", call_id="c1", ok=True, text="Snapshot retrieved."),
+                        Evidence(tool="check_routine_status", call_id="c2", ok=True, text="F" * 450),
+                    ],
+                    fallback=False,
+                    trace=[
+                        {
+                            "type": "result",
+                            "tool": "pull_snapshot",
+                            "ok": True,
+                            "data": {"path": snap_file, "captured_at": "2026-10-13T07:10:00Z"},
+                        }
+                    ],
+                )
+                save_investigation(
+                    conn,
+                    event_key=event_key,
+                    device_id="cam_combo",
+                    created_at=now,
+                    mode="replay",
+                    provider_name="mock",
+                    tier="escalate",
+                    decision="escalate",
+                    reason_code="cleared",
+                    recommendation=long_rec,
+                )
+
+                event = {
+                    "device_id": "cam_combo",
+                    "event_type": "motion_detected",
+                    "occurred_at": "2026-10-13T07:10:00Z",
+                }
+
+                notifier = ComboNotifier(photo_ok=photo_ok, text_ok=text_ok)
+                delivered = deliver_agent_notification(
+                    notifier=notifier,
+                    event=event,
+                    investigation=inv,
+                    now=now,
+                )
+
+                self.assertEqual(delivered, expected_deliv)
+                self.assertEqual(len(notifier.sent_photos), exp_p)
+                self.assertEqual(len(notifier.sent_messages), exp_t)
+
+                # Simulate runner's conditional update of notified_at
+                if delivered:
+                    now_iso = to_iso_timestamp(now)
+                    conn.execute(
+                        "UPDATE investigations SET notified_at = ? WHERE event_key = ?",
+                        (now_iso, inv.event_key),
+                    )
+                    conn.commit()
+
+                cur = conn.execute("SELECT notified_at FROM investigations WHERE event_key = ?", (event_key,))
+                notified_at_val = cur.fetchone()[0]
+
+                if expected_deliv:
+                    self.assertIsNotNone(notified_at_val)
+                else:
+                    self.assertIsNone(notified_at_val)
+
 
 if __name__ == "__main__":
     unittest.main()
+

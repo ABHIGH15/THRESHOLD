@@ -138,26 +138,36 @@ def deliver_agent_notification(
 
             # Send full text as separate message
             text_ok = False
-            if hasattr(notifier, "_make_request") and callable(getattr(notifier, "_make_request")):
-                payload = {
-                    "chat_id": getattr(notifier, "chat_id", ""),
-                    "text": message_text,
-                    "parse_mode": "HTML",
-                }
-                notifier._make_request("sendMessage", payload)
-                text_ok = True
-            elif hasattr(notifier, "send_message") and callable(getattr(notifier, "send_message")):
-                notifier.send_message(message_text)
-                text_ok = True
-            elif hasattr(notifier, "sent") and isinstance(getattr(notifier, "sent"), list):
-                notifier.sent.append({
-                    "type": "agent_check_needed_text",
-                    "text": message_text,
-                    "event": event,
-                })
-                text_ok = True
+            try:
+                if hasattr(notifier, "_make_request") and callable(getattr(notifier, "_make_request")):
+                    payload = {
+                        "chat_id": getattr(notifier, "chat_id", ""),
+                        "text": message_text,
+                        "parse_mode": "HTML",
+                    }
+                    res = notifier._make_request("sendMessage", payload)
+                    if isinstance(res, dict):
+                        text_ok = bool(res.get("ok", True))
+                    else:
+                        text_ok = bool(res)
+                elif hasattr(notifier, "send_message") and callable(getattr(notifier, "send_message")):
+                    res = notifier.send_message(message_text)
+                    if isinstance(res, dict):
+                        text_ok = bool(res.get("ok", True))
+                    else:
+                        text_ok = True
+                elif hasattr(notifier, "sent") and isinstance(getattr(notifier, "sent"), list):
+                    notifier.sent.append({
+                        "type": "agent_check_needed_text",
+                        "text": message_text,
+                        "event": event,
+                    })
+                    text_ok = True
+            except Exception as e:
+                logger.warning("Sending separate text message failed in over-limit branch: %s", e)
+                text_ok = False
 
-            delivered = photo_ok or text_ok
+            delivered = text_ok
         else:
             # Standard single-message delivery branch (<= 1000 chars)
             full_caption = truncate_caption(full_caption_raw, max_chars=1024)
@@ -168,26 +178,36 @@ def deliver_agent_notification(
                 logger.warning("send_photo failed for agent alert; falling back to sendMessage: %s", e)
 
     if not delivered:
-        if hasattr(notifier, "_make_request") and callable(getattr(notifier, "_make_request")):
-            payload = {
-                "chat_id": getattr(notifier, "chat_id", ""),
-                "text": message_text,
-                "parse_mode": "HTML",
-            }
-            notifier._make_request("sendMessage", payload)
-            delivered = True
-        elif hasattr(notifier, "send_message") and callable(getattr(notifier, "send_message")):
-            notifier.send_message(message_text)
-            delivered = True
-        elif hasattr(notifier, "sent") and isinstance(getattr(notifier, "sent"), list):
-            # For RecordingNotifier or test doubles
-            notifier.sent.append({
-                "type": "agent_check_needed",
-                "text": message_text,
-                "photo_bytes": photo_bytes,
-                "event": event,
-            })
-            delivered = True
+        try:
+            if hasattr(notifier, "_make_request") and callable(getattr(notifier, "_make_request")):
+                payload = {
+                    "chat_id": getattr(notifier, "chat_id", ""),
+                    "text": message_text,
+                    "parse_mode": "HTML",
+                }
+                res = notifier._make_request("sendMessage", payload)
+                if isinstance(res, dict):
+                    delivered = bool(res.get("ok", True))
+                else:
+                    delivered = bool(res)
+            elif hasattr(notifier, "send_message") and callable(getattr(notifier, "send_message")):
+                res = notifier.send_message(message_text)
+                if isinstance(res, dict):
+                    delivered = bool(res.get("ok", True))
+                else:
+                    delivered = True
+            elif hasattr(notifier, "sent") and isinstance(getattr(notifier, "sent"), list):
+                # For RecordingNotifier or test doubles
+                notifier.sent.append({
+                    "type": "agent_check_needed",
+                    "text": message_text,
+                    "photo_bytes": photo_bytes,
+                    "event": event,
+                })
+                delivered = True
+        except Exception as e:
+            logger.warning("Fallback text delivery failed: %s", e)
+            delivered = False
 
     return delivered
 
