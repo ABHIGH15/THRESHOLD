@@ -38,7 +38,7 @@ from src.threshold.agent.runner import format_agent_notification_text, process_n
 from src.threshold.agent.triggers import is_ambiguous_event
 from src.threshold.config import AgentConfig
 from src.threshold.daemon import DaemonConfig, ThresholdDaemon
-from src.threshold.notifier import RecordingNotifier
+from src.threshold.notifier import RecordingNotifier, format_snapshot_caption_prefix
 from src.threshold.ring_client import MediaUnavailable, RateLimited, TokenExpired
 from src.threshold.scheduler import FakeClock
 from src.threshold.store import (
@@ -1764,6 +1764,299 @@ class TestAgentLibrary(unittest.TestCase):
             sample_data["investigation"]["recommendation"],
             "docs/sample_investigation.json investigation recommendation has drifted",
         )
+
+    # --- 9. Photo Attachment Plumbing Tests (Task A9d) ---
+
+    def test_runner_photo_attachment_success(self):
+        """
+        (a) escalate + notify_enabled + snapshot ok -> send_photo called exactly once,
+        bytes length > 0, caption starts with format_snapshot_caption_prefix text.
+        State and verify: NO text message is sent when photo delivery succeeds.
+        """
+        save_routine(
+            self.conn,
+            routine_id="rt_day_door_p1",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+        save_event(self.conn, "webhook", "evt_photo_ok", "cam_front", "motion", "2026-10-12T07:10:00Z", "2026-10-12T07:10:00Z", {})
+        set_app_state(self.conn, "agent_event_cursor", "0")
+
+        class MockPhotoNotifier:
+            def __init__(self):
+                self.sent_photos = []
+                self.sent_messages = []
+
+            def send_photo(self, photo_bytes: bytes, caption: str):
+                self.sent_photos.append({"bytes": photo_bytes, "caption": caption})
+
+            def send_message(self, text: str):
+                self.sent_messages.append(text)
+
+        notifier = MockPhotoNotifier()
+        cfg = AgentConfig(
+            enabled=True,
+            notify_enabled=True,
+            trace_file="trace_escalate_two_tools.json",
+            snapshots_dir=self.temp_snapshots.name,
+        )
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+        ring_client = FakeRingClient("success")
+
+        res = process_new_events(
+            conn=self.conn,
+            provider_factory=lambda: MockProvider("trace_escalate_two_tools.json"),
+            now=now,
+            cfg=cfg,
+            notifier=notifier,
+            ring_client=ring_client,
+        )
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["decision"], "escalate")
+        self.assertTrue(res[0]["notified"])
+
+        # Photo delivered exactly once
+        self.assertEqual(len(notifier.sent_photos), 1)
+        self.assertGreater(len(notifier.sent_photos[0]["bytes"]), 0)
+        # Caption starts with format_snapshot_caption_prefix
+        expected_prefix = format_snapshot_caption_prefix(1791800000000, "America/Chicago", now=now)
+        self.assertTrue(
+            notifier.sent_photos[0]["caption"].startswith(expected_prefix),
+            f"Caption '{notifier.sent_photos[0]['caption']}' did not start with '{expected_prefix}'",
+        )
+        # Verify: NO text message is sent when photo delivery succeeds
+        self.assertEqual(len(notifier.sent_messages), 0)
+
+    def test_runner_photo_attachment_media_unavailable(self):
+        """
+        (b) snapshot failed (MediaUnavailable) -> text only, no send_photo.
+        """
+        save_routine(
+            self.conn,
+            routine_id="rt_day_door_p2",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+        save_event(self.conn, "webhook", "evt_photo_fail", "cam_front", "motion", "2026-10-12T07:10:00Z", "2026-10-12T07:10:00Z", {})
+        set_app_state(self.conn, "agent_event_cursor", "0")
+
+        class MockPhotoNotifier:
+            def __init__(self):
+                self.sent_photos = []
+                self.sent_messages = []
+
+            def send_photo(self, photo_bytes: bytes, caption: str):
+                self.sent_photos.append({"bytes": photo_bytes, "caption": caption})
+
+            def send_message(self, text: str):
+                self.sent_messages.append(text)
+
+        notifier = MockPhotoNotifier()
+        cfg = AgentConfig(
+            enabled=True,
+            notify_enabled=True,
+            trace_file="trace_escalate_two_tools.json",
+            snapshots_dir=self.temp_snapshots.name,
+        )
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+        ring_client = FakeRingClient("416")
+
+        res = process_new_events(
+            conn=self.conn,
+            provider_factory=lambda: MockProvider("trace_escalate_two_tools.json"),
+            now=now,
+            cfg=cfg,
+            notifier=notifier,
+            ring_client=ring_client,
+        )
+        self.assertEqual(len(res), 1)
+        # Snapshot failed -> no photo sent
+        self.assertEqual(len(notifier.sent_photos), 0)
+
+    def test_runner_photo_attachment_exception_fallback(self):
+        """
+        (c) send_photo raises -> runner catches the exception and falls back to text delivery.
+        """
+        save_routine(
+            self.conn,
+            routine_id="rt_day_door_p3",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+        save_event(self.conn, "webhook", "evt_photo_raise", "cam_front", "motion", "2026-10-12T07:10:00Z", "2026-10-12T07:10:00Z", {})
+        set_app_state(self.conn, "agent_event_cursor", "0")
+
+        class RaisingPhotoNotifier:
+            def __init__(self):
+                self.sent_photos = []
+                self.sent_messages = []
+
+            def send_photo(self, photo_bytes: bytes, caption: str):
+                self.sent_photos.append(photo_bytes)
+                raise RuntimeError("Simulated Telegram sendPhoto HTTP 500 error")
+
+            def send_message(self, text: str):
+                self.sent_messages.append(text)
+
+        notifier = RaisingPhotoNotifier()
+        cfg = AgentConfig(
+            enabled=True,
+            notify_enabled=True,
+            trace_file="trace_escalate_two_tools.json",
+            snapshots_dir=self.temp_snapshots.name,
+        )
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+        ring_client = FakeRingClient("success")
+
+        res = process_new_events(
+            conn=self.conn,
+            provider_factory=lambda: MockProvider("trace_escalate_two_tools.json"),
+            now=now,
+            cfg=cfg,
+            notifier=notifier,
+            ring_client=ring_client,
+        )
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["decision"], "escalate")
+        self.assertTrue(res[0]["notified"])
+        # send_photo was attempted and raised
+        self.assertEqual(len(notifier.sent_photos), 1)
+        # Fallback executed: text message sent
+        self.assertEqual(len(notifier.sent_messages), 1)
+        self.assertIn("CHECK NEEDED", notifier.sent_messages[0])
+
+    def test_runner_notifier_without_send_photo(self):
+        """
+        (d) notifier without send_photo -> text only.
+        """
+        save_routine(
+            self.conn,
+            routine_id="rt_day_door_p4",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+        save_event(self.conn, "webhook", "evt_no_photo_notifier", "cam_front", "motion", "2026-10-12T07:10:00Z", "2026-10-12T07:10:00Z", {})
+        set_app_state(self.conn, "agent_event_cursor", "0")
+
+        class TextOnlyNotifier:
+            def __init__(self):
+                self.sent_messages = []
+
+            def send_message(self, text: str):
+                self.sent_messages.append(text)
+
+        notifier = TextOnlyNotifier()
+        cfg = AgentConfig(
+            enabled=True,
+            notify_enabled=True,
+            trace_file="trace_escalate_two_tools.json",
+            snapshots_dir=self.temp_snapshots.name,
+        )
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+        ring_client = FakeRingClient("success")
+
+        res = process_new_events(
+            conn=self.conn,
+            provider_factory=lambda: MockProvider("trace_escalate_two_tools.json"),
+            now=now,
+            cfg=cfg,
+            notifier=notifier,
+            ring_client=ring_client,
+        )
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["decision"], "escalate")
+        self.assertTrue(res[0]["notified"])
+        # Only text delivered
+        self.assertEqual(len(notifier.sent_messages), 1)
+        self.assertIn("CHECK NEEDED", notifier.sent_messages[0])
+
+    def test_investigation_result_data_keys(self):
+        """
+        (e) Stored data has exactly the keys {path, captured_at}; trace_json stays JSON-serializable.
+        """
+        save_routine(
+            self.conn,
+            routine_id="rt_day_door_p5",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+        )
+        upsert_device_health(self.conn, "cam_front", 1, "2026-10-12T07:00:00Z", "webhook")
+        save_event(self.conn, "webhook", "evt_data_keys", "cam_front", "motion", "2026-10-12T07:10:00Z", "2026-10-12T07:10:00Z", {})
+        set_app_state(self.conn, "agent_event_cursor", "0")
+
+        cfg = AgentConfig(
+            enabled=True,
+            notify_enabled=False,
+            trace_file="trace_escalate_two_tools.json",
+            snapshots_dir=self.temp_snapshots.name,
+        )
+        now = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
+        ring_client = FakeRingClient("success")
+
+        res = process_new_events(
+            conn=self.conn,
+            provider_factory=lambda: MockProvider("trace_escalate_two_tools.json"),
+            now=now,
+            cfg=cfg,
+            notifier=None,
+            ring_client=ring_client,
+        )
+        self.assertEqual(len(res), 1)
+
+        inv_row = get_investigation(self.conn, "evt_data_keys")
+        self.assertIsNotNone(inv_row)
+        trace = json.loads(inv_row["trace_json"])
+        self.assertIsInstance(trace, list)
+
+        # Re-serialization stays valid JSON
+        serialized = json.dumps(trace)
+        self.assertIsInstance(serialized, str)
+
+        snapshot_steps = [s for s in trace if s.get("type") == "result" and s.get("tool") == "pull_snapshot"]
+        self.assertEqual(len(snapshot_steps), 1)
+        snap_step = snapshot_steps[0]
+        self.assertIn("data", snap_step)
+        data_keys = set(snap_step["data"].keys())
+        self.assertEqual(data_keys, {"path", "captured_at"})
+
+        # Check other tools do NOT carry data key
+        status_steps = [s for s in trace if s.get("type") == "result" and s.get("tool") == "check_routine_status"]
+        self.assertEqual(len(status_steps), 1)
+        self.assertNotIn("data", status_steps[0])
 
 
 if __name__ == "__main__":

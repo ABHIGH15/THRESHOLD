@@ -47,7 +47,11 @@
       "tool": "pull_snapshot",
       "ok": true,
       "text": "Snapshot retrieved successfully for device cam_front saved to snapshots/snapshot_cam_front_20261012_071000.jpg (captured at 2026-10-12T07:05:00Z).",
-      "error": null
+      "error": null,
+      "data": {
+        "path": "snapshots/snapshot_cam_front_20261012_071000.jpg",
+        "captured_at": "2026-10-12T07:05:00Z"
+      }
     },
     {
       "type": "final",

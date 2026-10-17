@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 
-repo_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+repo_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 work_dir = tempfile.mkdtemp(prefix="threshold_fresh_clone_")
 
 try:

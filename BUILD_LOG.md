@@ -1317,4 +1317,35 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 - **Test Suite:** Clean-clone full test suite passes with 260 tests OK.
 - **Frozen Diff:** Zero diff against `a3b749b`.
 
+### [2026-10-17T17:15:00Z] Task A9d: Photo Plumbing Fix, Real Telegram Alert Text in Demo, Repo Hygiene
 
+#### 1. Scope & Execution Overview
+- **Narrow Photo Plumbing Fix (`investigate.py`, `runner.py`)**:
+  - In `investigate.py`, preserved `data` dictionary containing whitelisted keys `{"path", "captured_at"}` (never raw bytes) in the step history for successful `pull_snapshot` tool results.
+  - In `runner.py`, forwarded configured `snapshots_dir` to `run_investigation_and_gate` so snapshots save into the configured temporary directory rather than defaulting to the current working directory.
+- **Unit Tests Added (`tests/test_agent.py`)**:
+  - `test_runner_photo_attachment_success`: escalate + notify_enabled + snapshot ok -> `send_photo` called exactly once, bytes > 0, caption starts with `format_snapshot_caption_prefix`; verified NO text message sent.
+  - `test_runner_photo_attachment_media_unavailable`: snapshot fails with `MediaUnavailable` (416) -> text only, no `send_photo`.
+  - `test_runner_photo_attachment_exception_fallback`: `send_photo` raises -> caught and logged; falls back to text `sendMessage`.
+  - `test_runner_notifier_without_send_photo`: notifier without `send_photo` -> delivers text alert.
+  - `test_investigation_result_data_keys`: stored `data` has exactly `{path, captured_at}`; `trace_json` remains JSON-serializable; other tools carry no `data` key.
+- **Real Telegram Text in Demo (`demo.py`)**:
+  - In `CapturingConsoleNotifier`, rendered escalation alerts through `format_escalation_text(routine, fired_at, device_health)` (`src/threshold/notifier.py:167`) and reminder alerts through the same format as `TelegramNotifier.send_reminder` (`src/threshold/notifier.py:752-760`).
+  - Stripped HTML tags for console and printed disclaimer: "Alert text below is exactly what the Telegram notifier would send (HTML tags stripped for the terminal)".
+  - Updated Scene 3 to show local formatted time: `Fired at: 20:31 CDT (2026-10-12)`.
+  - Updated Scene 5a to display photo attachment with real caption, dynamically computing narration from `sent_photos`.
+  - Updated closing table row "Alert formatting" to cite `format_escalation_text (notifier.py:167)`.
+- **Dashboard Path Leak Hardening (`dashboard.py`)**:
+  - Sanitized snapshot paths in both HTML rendering and `/api/investigations` to `snapshots/<basename>`, preventing filesystem path exposure even if stored with spaces or absolute prefixes.
+- **Incident Disclosure & Hygiene (`scripts/dev/`, `dashboard.html`)**:
+  - Documented root cause of `snapshots/snapshot_demo-cam-*` files during A9c (unforwarded `snapshots_dir` in `runner.py:289` defaulting to repo `snapshots/`). Verified zero files remain and confirmed `demo` and `demo --serve` leave 0 files in repo root.
+  - Resolved placeholder byte count (149 bytes is the real immutable length since A9; 76 bytes in A9b was an uncomputed narrative typo). Verified JPEG magic bytes (`\xff\xd8`).
+  - Moved 12 one-off verification scripts to `scripts/dev/` and added 3-line `scripts/dev/README.md`. Kept `scripts/run_demo.py` as an entry point.
+  - Sanitized `dashboard.html` line 6 to use public CDN for Tailwind CSS, achieving 0 forbidden string matches across tracked files.
+- **Zero Diff on Frozen Paths**:
+  - `gate.py`, `status.py`, `triage.py`, `models.py`, `scheduler.py`, `ingest.py`, and `notifier.py` remain strictly untouched (zero diff vs `a3b749b`).
+
+#### 2. Verification Summary
+- **Test Suite:** **265 tests passing** (260 baseline + 5 new photo plumbing tests).
+- **Demo Determinism:** Masked diff is byte-identical across runs.
+- **Network & File Hygiene:** 0 demo files in `snapshots/`, 0 secret leaks, 0 forbidden pattern matches.

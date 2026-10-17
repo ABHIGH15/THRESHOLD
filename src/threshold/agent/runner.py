@@ -282,11 +282,16 @@ def process_new_events(
                         break
                 event["timezone"] = tz_name
 
+                tools_dict = {"ring_client": ring_client}
+                snap_dir = cfg_dict.get("snapshots_dir") or (getattr(cfg, "snapshots_dir", None) if cfg else None)
+                if snap_dir:
+                    tools_dict["snapshots_dir"] = snap_dir
+
                 inv, gate_decision = run_investigation_and_gate(
                     conn=conn,
                     event=event,
                     provider=provider,
-                    tools={"ring_client": ring_client},
+                    tools=tools_dict,
                     now=now_utc,
                     save_to_db=True,
                 )

@@ -141,14 +141,20 @@ def investigate(
                 )
 
             tool_results_by_id[call_id] = tr
-            step_history.append({
+            result_step = {
                 "type": "result",
                 "call_id": call_id,
                 "tool": tr.tool,
                 "ok": tr.ok,
                 "text": tr.text,
                 "error": tr.error,
-            })
+            }
+            if tr.tool == "pull_snapshot" and tr.ok and isinstance(tr.data, dict):
+                result_step["data"] = {
+                    "path": tr.data.get("path"),
+                    "captured_at": tr.data.get("captured_at"),
+                }
+            step_history.append(result_step)
 
         elif isinstance(next_action, Final):
             final_output = next_action

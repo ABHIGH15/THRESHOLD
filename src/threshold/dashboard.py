@@ -503,9 +503,12 @@ def render_dashboard_html(data: Dict[str, Any]) -> str:
             if ev.get("tool") == "pull_snapshot" and ev_ok:
                 cited_pull_snapshot_ok = True
                 raw_text = str(ev.get("text", ""))
-                m = re.search(r"saved to\s+([^\s,]+)", raw_text)
+                m = re.search(r"saved to\s+(.+?)(?:\s*\(captured at|\.\s*$|$)", raw_text)
                 if m:
-                    snapshot_filename = os.path.basename(m.group(1))
+                    full_path = m.group(1).rstrip(".")
+                    snapshot_filename = os.path.basename(full_path)
+                    raw_text = raw_text.replace(full_path, f"snapshots/{snapshot_filename}")
+                ev_text = html.escape(raw_text)
 
             if ev_ok:
                 evidence_lines_html.append(f"""
@@ -1664,6 +1667,14 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                 if ev_json:
                     try:
                         ev_list = json.loads(ev_json) if isinstance(ev_json, str) else ev_json
+                        for item in ev_list:
+                            if isinstance(item, dict) and item.get("tool") == "pull_snapshot":
+                                t = item.get("text", "")
+                                m = re.search(r"saved to\s+(.+?)(?:\s*\(captured at|\.\s*$|$)", t)
+                                if m:
+                                    full_path = m.group(1).rstrip(".")
+                                    bname = os.path.basename(full_path)
+                                    item["text"] = t.replace(full_path, f"snapshots/{bname}")
                     except Exception:
                         ev_list = []
                 inv_item["evidence"] = ev_list

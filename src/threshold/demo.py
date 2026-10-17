@@ -45,6 +45,10 @@ from src.threshold.models import Routine
 from src.threshold.notifier import (
     ConsoleNotifier,
     Notifier,
+    format_escalation_text,
+    format_expected_by,
+    format_health_state,
+    format_last_activity,
     resolve_callback_routine_id,
 )
 from src.threshold.ingest import ingest_event
@@ -169,12 +173,11 @@ class CapturingConsoleNotifier(Notifier):
         fired_at: str,
         device_health: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        res = self.underlying.send_escalation(
-            routine=routine,
-            local_date=local_date,
-            fired_at=fired_at,
-            device_health=device_health,
-        )
+        text = format_escalation_text(routine, fired_at, device_health)
+        clean_text = re.sub(r"<[^>]+>", "", text)
+        print("\nAlert text below is exactly what the Telegram notifier would send (HTML tags stripped for the terminal):\n")
+        print(clean_text)
+        res = {"channel": "console", "delivered": True, "type": "text", "has_photo": False, "snapshot_path": None}
         self.sent_escalations.append({
             "routine_id": routine.routine_id,
             "routine_name": routine.name,
@@ -191,12 +194,22 @@ class CapturingConsoleNotifier(Notifier):
         fired_at: str,
         device_health: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        res = self.underlying.send_reminder(
-            routine=routine,
-            local_date=local_date,
-            fired_at=fired_at,
-            device_health=device_health,
+        expected_by = format_expected_by(routine)
+        health_state = format_health_state(routine, device_health)
+        last_act = format_last_activity(routine, device_health)
+        text = (
+            f"⚠️ <b>THRESHOLD REMINDER: Escalation Unacknowledged</b>\n\n"
+            f"Routine: <b>{routine.name}</b>\n"
+            f"Expected by: {expected_by}\n"
+            f"Device State: {health_state}\n"
+            f"Last Activity: {last_act}\n"
+            f"Originally fired at: {fired_at}\n\n"
+            f"<i>Please note: this is an automated message notification, not a phone call.</i>"
         )
+        clean_text = re.sub(r"<[^>]+>", "", text)
+        print("\nAlert text below is exactly what the Telegram notifier would send (HTML tags stripped for the terminal):\n")
+        print(clean_text)
+        res = {"channel": "console", "delivered": True, "type": "text", "has_photo": False, "snapshot_path": None}
         self.sent_reminders.append({
             "routine_id": routine.routine_id,
             "routine_name": routine.name,
@@ -370,7 +383,7 @@ class DemoPrinter:
             ("Status derivation", "REAL", "derive_status evaluates window + grace period"),
             ("Scheduler loop", "REAL", "Scheduler.tick checks deadlines and transitions"),
             ("Fire-once escalation", "REAL", "One escalation per missed routine per day (scheduler.py:277); reminders while unacknowledged (scheduler.py:318)"),
-            ("Alert formatting", "REAL", "ConsoleNotifier renders plain-text caregiver alerts"),
+            ("Alert formatting", "REAL", "Rendered through format_escalation_text (notifier.py:167) matching Telegram production alerts"),
             ("Agent tool execution", "REAL", "check_routine_status, check_household_memory real; Ring client is fake returning 1x1 placeholder JPEG"),
             ("Evidence derivation", "REAL", "Derives evidence strictly from tool execution results"),
             ("Deterministic gate", "REAL", "Pure function gate enforces evidence & cooldown bars"),
@@ -699,7 +712,13 @@ def run_demo_pipeline(
         reason_5a = proc_5a[0]["reason_code"] if proc_5a else "none"
         notif_5a = proc_5a[0].get("notified", False) if proc_5a else False
         print(f"  Investigation: mode: replay (scripted) | decision: {dec_5a} (reason: {reason_5a})")
-        print(f"  Notification:  CHECK NEEDED alert dispatched with ✓/✗ evidence lines: {notif_5a} (text-only via send_message; no photo attachment dispatched)")
+        has_photo = len(capturing_agent_5a.sent_photos) > 0
+        photo_detail = (
+            f"photo attachment ({capturing_agent_5a.sent_photos[0]['bytes_len']} bytes) via send_photo"
+            if has_photo
+            else "text-only via send_message"
+        )
+        print(f"  Notification:  CHECK NEEDED alert dispatched with ✓/✗ evidence lines: {notif_5a} ({photo_detail})")
         _sync_demo_snapshots(snapshot_dir)
 
         # Event 5b: Dedupe check on same device 15 min later (02:25 CDT)
