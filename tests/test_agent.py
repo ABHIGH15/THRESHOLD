@@ -1294,7 +1294,8 @@ class TestAgentLibrary(unittest.TestCase):
             "device_id": "sensor_cabinet",
             "occurred_at": "2026-10-12T12:30:00Z",
         }
-        self.assertIsNone(is_ambiguous_event(self.conn, event_in_window, now))
+        with self.subTest(case="motion_in_routine_window"):
+            self.assertIsNone(is_ambiguous_event(self.conn, event_in_window, now))
 
         # Event at 09:15 CDT (14:15 UTC, inside 30m grace buffer) satisfies routine
         event_in_grace = {
@@ -1302,7 +1303,45 @@ class TestAgentLibrary(unittest.TestCase):
             "device_id": "sensor_cabinet",
             "occurred_at": "2026-10-12T14:15:00Z",
         }
-        self.assertIsNone(is_ambiguous_event(self.conn, event_in_grace, now))
+        with self.subTest(case="motion_in_grace_buffer"):
+            self.assertIsNone(is_ambiguous_event(self.conn, event_in_grace, now))
+
+    def test_is_ambiguous_negative_cases(self):
+        """Composite test verifying all four negative cases using subTest."""
+        save_routine(
+            self.conn,
+            routine_id="rt_composite_door",
+            property_id="prop_1",
+            name="Day Door",
+            device_id="cam_front",
+            expected_event_type="motion_detected",
+            window_start="07:00",
+            window_end="09:00",
+            timezone_name="America/Chicago",
+            days=["mon"],
+            escalation_delay_minutes=30,
+        )
+        now_day = datetime(2026, 10, 12, 14, 0, tzinfo=timezone.utc)
+
+        # Case 1: non-motion event
+        with self.subTest(case="non_motion_event"):
+            evt = {"event_type": "door_opened", "device_id": "cam_front", "occurred_at": "2026-10-12T07:10:00Z"}
+            self.assertIsNone(is_ambiguous_event(self.conn, evt, now_day))
+
+        # Case 2: device not in any routine
+        with self.subTest(case="untracked_device_no_routine"):
+            evt = {"event_type": "motion_detected", "device_id": "untracked_yard_cam", "occurred_at": "2026-10-12T07:10:00Z"}
+            self.assertIsNone(is_ambiguous_event(self.conn, evt, now_day))
+
+        # Case 3: motion satisfies routine window / grace
+        with self.subTest(case="satisfies_routine_window"):
+            evt = {"event_type": "motion_detected", "device_id": "cam_front", "occurred_at": "2026-10-12T12:30:00Z"}
+            self.assertIsNone(is_ambiguous_event(self.conn, evt, now_day))
+
+        # Case 4: motion outside quiet hours
+        with self.subTest(case="daytime_outside_quiet_hours"):
+            evt = {"event_type": "motion_detected", "device_id": "cam_front", "occurred_at": "2026-10-12T19:00:00Z"}
+            self.assertIsNone(is_ambiguous_event(self.conn, evt, now_day))
 
     def test_is_ambiguous_false_for_motion_outside_quiet_hours(self):
         """is_ambiguous_event is False for motion outside quiet hours (daytime)."""

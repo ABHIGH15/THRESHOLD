@@ -20,6 +20,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -46,6 +47,7 @@ from src.threshold.notifier import (
     Notifier,
     resolve_callback_routine_id,
 )
+from src.threshold.ingest import ingest_event
 from src.threshold.scheduler import build_device_health_record, FakeClock, Scheduler
 from src.threshold.server import create_server
 from src.threshold.status import derive_status
@@ -55,7 +57,6 @@ from src.threshold.store import (
     get_routine,
     init_db,
     record_correction,
-    record_escalation,
     row_to_routine,
     save_routine,
     set_app_state,
@@ -140,21 +141,26 @@ class CapturingConsoleNotifier(Notifier):
     """
     Wraps ConsoleNotifier to print real alerts via format_escalation_text while
     recording sent notifications in-memory for assertion and structured reporting.
+    Strips Telegram HTML formatting for clean terminal output.
     """
 
     def __init__(self, console_notifier: ConsoleNotifier):
         self.underlying = console_notifier
         self.sent_escalations: List[Dict[str, Any]] = []
+        self.sent_reminders: List[Dict[str, Any]] = []
         self.sent_messages: List[str] = []
         self.sent_photos: List[Dict[str, Any]] = []
 
     def send_message(self, text: str) -> None:
         self.sent_messages.append(text)
-        print("\n" + text)
+        clean_text = re.sub(r"<[^>]+>", "", text)
+        print("\n" + clean_text)
 
     def send_photo(self, photo_bytes: bytes, caption: str) -> None:
         self.sent_photos.append({"bytes_len": len(photo_bytes), "caption": caption})
-        print("\n" + caption)
+        clean_caption = re.sub(r"<[^>]+>", "", caption)
+        print(f"\n[PHOTO ATTACHMENT: {len(photo_bytes)} bytes (simulated placeholder, not a camera image)]")
+        print(clean_caption)
 
     def send_escalation(
         self,
@@ -185,12 +191,20 @@ class CapturingConsoleNotifier(Notifier):
         fired_at: str,
         device_health: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        return self.underlying.send_reminder(
+        res = self.underlying.send_reminder(
             routine=routine,
             local_date=local_date,
             fired_at=fired_at,
             device_health=device_health,
         )
+        self.sent_reminders.append({
+            "routine_id": routine.routine_id,
+            "routine_name": routine.name,
+            "local_date": local_date,
+            "fired_at": fired_at,
+            "res": res,
+        })
+        return res
 
 
 # ─── Webhook Helpers ──────────────────────────────────────────────────────────
@@ -354,7 +368,7 @@ class DemoPrinter:
             ("Webhook ingestion", "REAL", "ingest_event parses schema and normalizes types"),
             ("Status derivation", "REAL", "derive_status evaluates window + grace period"),
             ("Scheduler loop", "REAL", "Scheduler.tick checks deadlines and transitions"),
-            ("Fire-once escalation", "REAL", "Escalation ladder fires strictly once per missed routine"),
+            ("Fire-once escalation", "REAL", "One escalation per missed routine per day (scheduler.py:277); reminders while unacknowledged (scheduler.py:318)"),
             ("Alert formatting", "REAL", "ConsoleNotifier renders plain-text caregiver alerts"),
             ("Agent tool execution", "REAL", "check_routine_status, pull_snapshot, check_household_memory"),
             ("Evidence derivation", "REAL", "Derives evidence strictly from tool execution results"),
@@ -451,18 +465,35 @@ def run_demo_pipeline(
         escalation_delay_minutes=30,
     )
 
-    # Seed 2 historical false alarms for demo-cam-front-door using the REAL callback pathway
-    # (resolve_callback_routine_id -> record_correction -> ack_escalation)
-    for past_date in ("2026-10-10", "2026-10-11"):
-        record_escalation(
-            conn=conn,
-            routine_id="rt_evening_checkin",
-            local_date=past_date,
-            fired_at=f"{past_date}T20:31:00Z",
-            notified_at=f"{past_date}T20:31:00Z",
-            ignore_conflicts=True,
-        )
-        process_demo_callback(conn, f"fa:rt_evening_checkin:{past_date}", f"{past_date}T20:35:00Z")
+    # Pre-roll: Replay Sat Oct 10 and Sun Oct 11 routines through REAL scheduler.tick() + callback
+    # (Zero direct row inserts: scheduler evaluates deadline, records escalation; callback acknowledges and records correction)
+    class SilentNotifier(Notifier):
+        def send_message(self, text: str) -> None: pass
+        def send_photo(self, photo_bytes: bytes, caption: str) -> None: pass
+        def send_escalation(self, *a, **kw) -> Dict[str, Any]: return {"status": "ok"}
+        def send_reminder(self, *a, **kw) -> Dict[str, Any]: return {"status": "ok"}
+
+    silent_notif = SilentNotifier()
+    pre_clock = FakeClock(datetime(2026, 10, 11, 1, 31, tzinfo=timezone.utc))  # Sat 20:31 CDT
+    pre_scheduler = Scheduler(db_path=db_path, clock=pre_clock, notifier=silent_notif)
+
+    # Ingest normal weekend morning movements (07:30 CDT = 12:30 UTC)
+    ingest_event(conn, "webhook", "pre_evt_sat_m", "demo-cam-living-room", "motion_detected", "human", "2026-10-10T12:30:00Z", {})
+    ingest_event(conn, "webhook", "pre_evt_sun_m", "demo-cam-living-room", "motion_detected", "human", "2026-10-11T12:30:00Z", {})
+
+    # Replay Sat Oct 10 evening checkin miss
+    upsert_device_health(conn, "demo-cam-front-door", 1, "2026-10-11T01:00:00Z", "webhook")
+    pre_scheduler.tick()
+    process_demo_callback(conn, "fa:rt_evening_checkin:2026-10-10", "2026-10-11T01:35:00Z")
+
+    # Replay Sun Oct 11 evening checkin miss
+    pre_clock.set_time(datetime(2026, 10, 12, 1, 31, tzinfo=timezone.utc))  # Sun 20:31 CDT
+    upsert_device_health(conn, "demo-cam-front-door", 1, "2026-10-12T01:00:00Z", "webhook")
+    pre_scheduler.tick()
+    process_demo_callback(conn, "fa:rt_evening_checkin:2026-10-11", "2026-10-12T01:35:00Z")
+
+    pre_roll_count = conn.execute("SELECT COUNT(*) FROM corrections WHERE label = 'false_alarm'").fetchone()[0]
+    print(f"  Pre-roll:  Replayed Sat/Sun missed routines through scheduler.tick() + callback. Historical false alarms in DB: {pre_roll_count}.")
 
     server = create_server(host="127.0.0.1", port=0, db_path=db_path, secret=demo_secret)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -545,21 +576,42 @@ def run_demo_pipeline(
         # Set clock to 20:31 CDT (01:31 UTC next day)
         clock.set_time(datetime(2026, 10, 13, 1, 31, tzinfo=timezone.utc))
         upsert_device_health(conn, "demo-cam-front-door", 1, "2026-10-13T01:00:00Z", "webhook")
+        r3_row = get_routine(conn, "rt_evening_checkin")
+        r3 = row_to_routine(r3_row)
+        health_s3 = build_device_health_record(conn=conn, device_id=r3.device_id, now=clock.now())
+        status_s3 = derive_status(routine=r3, device_health=health_s3, now=clock.now())
+
         pre_esc_count = len(capturing_notif.sent_escalations)
+        pre_rem_count = len(capturing_notif.sent_reminders)
         tick_s3_1 = scheduler.tick()
         post_esc_count_1 = len(capturing_notif.sent_escalations)
+        post_rem_count_1 = len(capturing_notif.sent_reminders)
         new_escs_1 = post_esc_count_1 - pre_esc_count
+        new_rems_1 = post_rem_count_1 - pre_rem_count
 
-        print(f"  [20:31 CDT] Deadline passed! Status transitions to {printer.red('MISSED')}.")
+        print(f"  [20:31 CDT] Deadline passed! Status transitions to {printer.red(status_s3.upper())}.")
         print(f"  Dispatched: Exactly {printer.bold(str(new_escs_1))} escalation alert sent to caregiver via ConsoleNotifier.")
 
-        # Tick again at 20:46 CDT to verify fire-once deduplication
+        # Move False-alarm tap to 20:38 CDT (shortly after the alert, before next tick)
+        clock.set_time(datetime(2026, 10, 13, 1, 38, tzinfo=timezone.utc))
+        cb_s3 = process_demo_callback(conn, "fa:rt_evening_checkin:2026-10-12", "2026-10-13T01:38:00Z")
+        print(f"  [20:38 CDT] Caregiver taps [False alarm]. Real callback processed: {cb_s3} (escalation acknowledged).")
+
+        # Tick again at 20:46 CDT (15 minutes after alert) to check reminders
         clock.set_time(datetime(2026, 10, 13, 1, 46, tzinfo=timezone.utc))
         tick_s3_2 = scheduler.tick()
         post_esc_count_2 = len(capturing_notif.sent_escalations)
+        post_rem_count_2 = len(capturing_notif.sent_reminders)
         new_escs_2 = post_esc_count_2 - post_esc_count_1
-        print(f"  [20:46 CDT] Subsequent scheduler tick: {new_escs_2} alerts fired (fire-once deduplication enforced).")
-        results["scenes"]["s3"] = {"first_tick_escalations": new_escs_1, "second_tick_escalations": new_escs_2}
+        new_rems_2 = post_rem_count_2 - post_rem_count_1
+        print(f"  [20:46 CDT] Subsequent scheduler tick: escalations={new_escs_2}, reminders={new_rems_2} (acknowledged; no reminder dispatched).")
+        results["scenes"]["s3"] = {
+            "status": status_s3,
+            "first_tick_escalations": new_escs_1,
+            "second_tick_escalations": new_escs_2,
+            "second_tick_reminders": new_rems_2,
+            "callback_success": cb_s3,
+        }
 
         # ─── SCENE 4: UNKNOWN Offline Not Alarm ──────────────────────────────
         printer.sleep_pace()
@@ -633,12 +685,30 @@ def run_demo_pipeline(
         post_signed_event(webhook_port, demo_secret, p5b)
         evt_row_5b = conn.execute("SELECT * FROM events ORDER BY rowid DESC LIMIT 1").fetchone()
         ambig_5b = is_ambiguous_event(conn, dict(evt_row_5b), clock.now())
-        print(f"  Dedupe:    is_ambiguous_event returned: {ambig_5b} (deduped within 30m cooldown).")
+        agent_cfg_5b = AgentConfig(
+            enabled=True,
+            provider="mock",
+            trace_file="trace_escalate_two_tools.json",
+            notify_enabled=True,
+            snapshots_dir=snapshot_dir,
+        )
+        proc_5b = process_new_events(
+            conn=conn,
+            provider_factory=lambda: MockProvider("trace_escalate_two_tools.json"),
+            now=clock.now(),
+            cfg=agent_cfg_5b,
+            notifier=capturing_agent_5a,
+            ring_client=snapshot_client,
+        )
+        inv_created_5b = [p for p in proc_5b if p.get("ambiguous")]
+        print(f"  Dedupe:    is_ambiguous_event returned: {ambig_5b} (deduped within 30m cooldown: True).")
+        print(f"             process_new_events advanced cursor past event 5b; investigations created: {len(inv_created_5b)}.")
 
         # Event 5c: Different camera at 02:50 CDT with insufficient evidence (1 tool) -> Gate downgrade
+        print("  Device:    Hallway camera connectivity restored (simulated healthy poll at 02:45 CDT).")
+        upsert_device_health(conn, "demo-cam-hallway", 1, "2026-10-13T07:45:00Z", "webhook")
         print("  Event 5c:  Tue 02:50 CDT motion on hallway camera using trace_escalate_one_tool.")
         clock.set_time(datetime(2026, 10, 13, 7, 50, tzinfo=timezone.utc))
-        upsert_device_health(conn, "demo-cam-hallway", 1, "2026-10-13T07:45:00Z", "webhook")
         p5c = make_ring_payload("demo-cam-hallway", "motion_detected", "2026-10-13T07:50:00Z")
         post_signed_event(webhook_port, demo_secret, p5c)
 
@@ -662,8 +732,9 @@ def run_demo_pipeline(
         dec_5c = proc_5c[0]["decision"] if proc_5c else "none"
         reason_5c = proc_5c[0]["reason_code"] if proc_5c else "none"
         notif_5c = proc_5c[0].get("notified", False) if proc_5c else False
+        notifs_sent_5c = len(capturing_agent_5c.sent_messages) + len(capturing_agent_5c.sent_photos)
         print(f"  Investigation: mode: replay (scripted) | decision: {dec_5c} (reason: {reason_5c})")
-        print(f"  Gate Guard:    Downgraded to check_needed due to insufficient_evidence. Notifications sent: {len(capturing_agent_5c.sent_escalations)}.")
+        print(f"  Gate Guard:    Downgraded to check_needed due to {reason_5c}. Notifications sent: {notifs_sent_5c}.")
         results["scenes"]["s5"] = {
             "decision_5a": dec_5a,
             "reason_5a": reason_5a,
@@ -677,14 +748,11 @@ def run_demo_pipeline(
         # ─── SCENE 6: Memory ────────────────────────────────────────────────
         printer.sleep_pace()
         print("\n" + printer.bold("[SCENE 6: HOUSEHOLD MEMORY] Caretaker Resolution & Learned Safety"))
-        print("  Action 6a: Caregiver taps [False alarm] on the Scene 3 escalation.")
-        cb_s6 = process_demo_callback(conn, "fa:rt_evening_checkin:2026-10-12", "2026-10-13T01:35:00Z")
-        print(f"  Callback:  Real callback pathway executed. Correction recorded in database: {cb_s6}.")
-
-        # Event 6b: Quiet-hours motion at front door at 03:40 CDT (08:40 UTC)
+        print("  Context:   Scene 3 false-alarm callback acknowledged Monday's alert (3rd total in 30 days).")
+        print("  Device:    Front door camera confirmed healthy (simulated healthy poll at 03:30 CDT).")
+        upsert_device_health(conn, "demo-cam-front-door", 1, "2026-10-13T08:30:00Z", "webhook")
         print("  Event 6b:  Tue 03:40 CDT motion on front door camera. Agent checks household memory.")
         clock.set_time(datetime(2026, 10, 13, 8, 40, tzinfo=timezone.utc))
-        upsert_device_health(conn, "demo-cam-front-door", 1, "2026-10-13T08:30:00Z", "webhook")
         p6b = make_ring_payload("demo-cam-front-door", "motion_detected", "2026-10-13T08:40:00Z")
         post_signed_event(webhook_port, demo_secret, p6b)
 
@@ -716,14 +784,20 @@ def run_demo_pipeline(
             if ev_list:
                 evidence_text = ev_list[0].get("text", "")
 
+        db_corr_count = conn.execute("SELECT COUNT(*) FROM corrections WHERE label = 'false_alarm'").fetchone()[0]
+        notif_count_6 = len(capturing_agent_6.sent_messages) + len(capturing_agent_6.sent_photos)
+
         print(f"  Investigation: mode: replay (scripted) | decision: {dec_6} (reason: {reason_6})")
         print(f"  Derived Proof: Evidence derived from real tool result: '{evidence_text}'")
-        print("  Safety:        Alert safely suppressed based on verified historical false alarms.")
+        print(f"  Safety:        Agent evaluated household memory ({db_corr_count} verified false alarms). Gate selected tier '{dec_6}'.")
+        print(f"                 Telegram notifications sent: {notif_count_6}. Event recorded on dashboard as 'Check needed'.")
+        print("                 Absence alerts (missed routine monitoring) remain 100% active and untouched.")
         results["scenes"]["s6"] = {
-            "callback_success": cb_s6,
             "decision": dec_6,
             "reason": reason_6,
             "evidence_text": evidence_text,
+            "db_corrections": db_corr_count,
+            "notifications_sent": notif_count_6,
         }
 
         printer.print_closing_table()

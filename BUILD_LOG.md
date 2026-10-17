@@ -1253,3 +1253,48 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 #### 4. Status
 - PARTIAL items: None.
 - TODO-VERIFY items: None.
+
+---
+
+### [2026-10-17T09:15:00Z] Task A9b — Demo Honesty Fixes and RAW Evidence (COMPLETE)
+
+#### 1. Scope & Execution Overview
+- Resolved all demo narration inaccuracies, unbacked claims, and timing inconsistencies identified in A9 review.
+- Maintained strict isolation and zero edits across all FROZEN files (`gate.py`, `status.py`, `triage.py`, `models.py`, `scheduler.py`, `ingest.py`, and existing `notifier.py` functions) with verified empty diff against `a3b749b`.
+- Updated `src/threshold/demo.py`, `tests/test_agent.py`, `tests/test_demo.py`, and `src/threshold/agent/traces/trace_escalate_two_tools.json`.
+
+#### 2. Key Changes & Honesty Hardening
+1. **Real Pre-roll (Zero Hand-Written Rows)**:
+   - Replaced direct `record_escalation` SQL/store calls with a genuine pre-roll executing `scheduler.tick()` and `process_demo_callback()` for Sat Oct 10 and Sun Oct 11 missed routines.
+   - Weekend morning movement events are ingested so `rt_morning_movement` is observed throughout the weekend.
+   - Pre-roll outputs are suppressed via `SilentNotifier`, and exactly one summary line computed directly from `SELECT COUNT(*) FROM corrections` is printed.
+2. **Caregiver Callback Moved to 20:38 CDT**:
+   - In Scene 3, caregiver false alarm tap occurs at 20:38 CDT (7 minutes after 20:31 alert), setting `acked_at` and recording the 3rd correction.
+   - At the 20:46 CDT tick (15m reminder window), `scheduler.tick()` evaluates acknowledged escalation: `escalations=0, reminders=0` computed directly from notifier records.
+   - Replaced hand-coded narration with computed counts by notification type.
+3. **Closing Table Row Accurate Citing**:
+   - Updated "Fire-once escalation" implementation note in closing table to cite exact scheduler code: `One escalation per missed routine per day (scheduler.py:277); reminders while unacknowledged (scheduler.py:318)`.
+4. **Scene 6 Factual Computed Text**:
+   - Replaced subjective "Alert safely suppressed" with factual statements: no Telegram message was sent, event recorded on dashboard as "Check needed", absence alerts remain 100% active and untouched.
+5. **Hallway Camera Recovery Narration**:
+   - Added explicit narration line before Scene 5c for restored connectivity at 02:45 CDT.
+6. **Snapshot Placeholder Labeling & Trace Text**:
+   - Updated `trace_escalate_two_tools.json` recommendation to: "Snapshot requested for caregiver review."
+   - Labeled placeholder JPEG `[PHOTO ATTACHMENT: 76 bytes (simulated placeholder, not a camera image)]` in `CapturingConsoleNotifier`.
+   - Verified dashboard serves valid 76-byte JFIF JPEG at `/snapshots/...` without broken images.
+7. **Clean Sequential Investigation IDs (1, 2, 3)**:
+   - In Scene 5b, invoked `process_new_events()` at 07:25 UTC to evaluate within 30m cooldown, advancing cursor without creating an investigation.
+   - Yields clean sequential investigation IDs 1, 2, 3 in database and API.
+8. **Telegram HTML Tag Stripping**:
+   - `CapturingConsoleNotifier` strips HTML tags for clean console display.
+9. **Negative Trigger Subtests**:
+   - Added `self.subTest(...)` to negative trigger tests in `tests/test_agent.py` and added composite `test_is_ambiguous_negative_cases`.
+10. **T1 Test Assertions**:
+    - Updated `test_t1_scene_assertions_structured_api` to assert on computed values, spied `record_correction` call count (3), and message counts by type.
+
+#### 3. Verification Summary
+- **Chrome Console Errors:** 1 in positive control, 0 on real dashboard served by `demo --serve`.
+- **Demo Determinism:** `test_t6_output_determinism` byte-identical across runs.
+- **Network Guard:** `test_t5_network_guard` verified blocking external traffic.
+- **Total Test Suite:** **259 tests passing** in $\approx 50.3$s (`OK`).
+

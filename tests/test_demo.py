@@ -35,7 +35,18 @@ class TestThresholdDemo(unittest.TestCase):
 
     def test_t1_scene_assertions_structured_api(self):
         """T1: Function API executes S1-S6 and returns structured assertions."""
-        res = run_demo_pipeline(pace=0.0, no_color=True, serve=False)
+        import unittest.mock as mock
+        from src.threshold import demo as demo_mod
+
+        correction_calls = []
+        orig_record_correction = demo_mod.record_correction
+
+        def spy_record_correction(*args, **kwargs):
+            correction_calls.append((args, kwargs))
+            return orig_record_correction(*args, **kwargs)
+
+        with mock.patch("src.threshold.demo.record_correction", side_effect=spy_record_correction):
+            res = run_demo_pipeline(pace=0.0, no_color=True, serve=False)
 
         self.assertTrue(res.get("success"), "Pipeline should report overall success")
         scenes = res.get("scenes", {})
@@ -48,9 +59,12 @@ class TestThresholdDemo(unittest.TestCase):
         self.assertEqual(scenes["s2"]["bad_sig_status"], 401)
         self.assertTrue(scenes["s2"]["idempotent"])
 
-        # Scene 3: Missed routine (exactly 1 escalation, subsequent tick 0)
+        # Scene 3: Missed routine (1 escalation, callback at 20:38 acked, second tick 0 escalations & 0 reminders)
+        self.assertEqual(scenes["s3"]["status"], "missed")
         self.assertEqual(scenes["s3"]["first_tick_escalations"], 1)
+        self.assertTrue(scenes["s3"]["callback_success"])
         self.assertEqual(scenes["s3"]["second_tick_escalations"], 0)
+        self.assertEqual(scenes["s3"]["second_tick_reminders"], 0)
 
         # Scene 4: UNKNOWN offline device silenced (0 escalations)
         self.assertEqual(scenes["s4"]["status"], "unknown")
@@ -66,10 +80,17 @@ class TestThresholdDemo(unittest.TestCase):
         self.assertFalse(scenes["s5"]["notified_5c"])
 
         # Scene 6: Household memory quiets alert with evidence from real tool result
-        self.assertTrue(scenes["s6"]["callback_success"])
         self.assertEqual(scenes["s6"]["decision"], "check_needed")
         self.assertEqual(scenes["s6"]["reason"], "check_needed")
-        self.assertIn("3 false alarm(s) out of 3 correction(s)", scenes["s6"]["evidence_text"])
+        self.assertEqual(scenes["s6"]["notifications_sent"], 0)
+        self.assertEqual(scenes["s6"]["db_corrections"], 3)
+        self.assertEqual(
+            len(correction_calls),
+            3,
+            "Corrections row count must equal number of record_correction calls",
+        )
+        expected_memory_str = f"{len(correction_calls)} false alarm(s) out of {len(correction_calls)} correction(s)"
+        self.assertIn(expected_memory_str, scenes["s6"]["evidence_text"])
 
     def test_t2_cli_subprocess_smoke(self):
         """T2: CLI subprocess smoke runs cleanly and contains required honesty banners."""
