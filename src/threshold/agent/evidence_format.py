@@ -41,13 +41,16 @@ def format_evidence_text_for_dashboard(text: str) -> str:
     return text
 
 
-def format_evidence_text_for_caregiver(text: str) -> str:
+def format_evidence_text_for_caregiver(text: str, timezone_name: Optional[str] = None) -> str:
     """
     Format evidence text for caregiver-facing notifications.
     Completely drops the internal 'saved to <path>' clause, leaving clean user-facing text
-    such as 'Snapshot retrieved successfully for device X (captured at ...)'.
+    such as 'Snapshot retrieved successfully for device X (captured 02:10 CDT)'.
     Guarantees no internal filesystem paths (/var/folders, /Users, /tmp, snapshots/)
     appear in messages sent to caregivers.
+    If timezone_name is provided and an ISO timestamp is present, converts '(captured at <iso>)'
+    to '(captured <HH:MM TZ>)' in the specified timezone.
+    If timezone is not available or conversion fails, leaves timestamp as is.
     """
     if not text:
         return ""
@@ -58,5 +61,25 @@ def format_evidence_text_for_caregiver(text: str) -> str:
         cleaned = text.replace(clause, "")
         cleaned = re.sub(r"\s+\.", ".", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
-        return cleaned
-    return text
+    else:
+        cleaned = text
+
+    if timezone_name:
+        m_cap = re.search(r"\(captured at\s+([^)]+)\)", cleaned)
+        if m_cap:
+            iso_str = m_cap.group(1).strip()
+            try:
+                from datetime import datetime, timezone
+                from zoneinfo import ZoneInfo
+                clean_iso = iso_str.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(clean_iso)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                tz = ZoneInfo(timezone_name)
+                local_dt = dt.astimezone(tz)
+                time_str = local_dt.strftime("%H:%M %Z")
+                cleaned = cleaned.replace(m_cap.group(0), f"(captured {time_str})")
+            except Exception:
+                pass
+
+    return cleaned

@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import urllib.error
 import urllib.request
 import uuid
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.threshold.agent.investigate import run_investigation_and_gate
 from src.threshold.agent.provider import MockProvider
@@ -424,20 +424,11 @@ def _sync_demo_snapshots(dest_dir: str) -> None:
 
 # ─── Demo Pipeline Execution ──────────────────────────────────────────────────
 
-def run_demo_pipeline(
+def _run_demo_pipeline_impl(
     pace: float = 0.0,
     no_color: bool = False,
     serve: bool = False,
 ) -> Dict[str, Any]:
-    """
-    Executes the complete 6-scene hackathon demonstration end-to-end:
-      Scene 1: Calm morning (routine observed, 0 alerts)
-      Scene 2: Trust boundary (401 rejected, deduplication idempotent)
-      Scene 3: Missed routine (fire-once escalation)
-      Scene 4: UNKNOWN device offline not alarm (0 escalations)
-      Scene 5: Check needed (escalate cleared vs gate downgrade)
-      Scene 6: Household memory quiets alert safely (real callback path)
-    """
     printer = DemoPrinter(no_color=no_color, pace=pace)
     printer.print_banner()
 
@@ -883,18 +874,45 @@ def run_demo_pipeline(
     return results
 
 
+def run_demo_pipeline(
+    pace: float = 0.0,
+    no_color: bool = False,
+    serve: bool = False,
+) -> Dict[str, Any]:
+    """
+    Executes the complete 6-scene hackathon demonstration end-to-end:
+      Scene 1: Calm morning (routine observed, 0 alerts)
+      Scene 2: Trust boundary (401 rejected, deduplication idempotent)
+      Scene 3: Missed routine (fire-once escalation)
+      Scene 4: UNKNOWN device offline not alarm (0 escalations)
+      Scene 5: Check needed (escalate cleared vs gate downgrade)
+      Scene 6: Household memory quiets alert safely (real callback path)
+    """
+    try:
+        return _run_demo_pipeline_impl(pace=pace, no_color=no_color, serve=serve)
+    except ZoneInfoNotFoundError:
+        uninstall_network_guard()
+        print("Timezone data missing: pip install tzdata, or run on macOS/Linux", file=sys.stderr)
+        return {"success": False, "error": "timezone_data_missing"}
+
+
 def main() -> int:
     """CLI entry point for python3 -m src.threshold demo."""
     parser = argparse.ArgumentParser(
         description="Threshold — Zero-Secret Simulated Household Hackathon Demonstration"
     )
     parser.add_argument("--pace", type=float, default=0.0, help="Pace in seconds between scenes (default: 0)")
+    parser.add_argument("--fast", "-f", action="store_true", help="Run without pacing delays")
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
     parser.add_argument("--serve", action="store_true", help="Start read-only dashboard after scenes finish")
 
     args = parser.parse_args()
-    res = run_demo_pipeline(pace=args.pace, no_color=args.no_color, serve=args.serve)
-    return 0 if res.get("success", False) else 1
+    try:
+        res = run_demo_pipeline(pace=args.pace, no_color=args.no_color, serve=args.serve)
+        return 0 if res.get("success", False) else 1
+    except ZoneInfoNotFoundError:
+        print("Timezone data missing: pip install tzdata, or run on macOS/Linux", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

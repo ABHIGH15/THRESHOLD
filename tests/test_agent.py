@@ -2099,13 +2099,17 @@ class TestAgentLibrary(unittest.TestCase):
             "occurred_at": "2026-10-13T07:10:00Z",
         }
 
-        # 1. Caregiver notification message
+        # 1. Caregiver notification message converts UTC timestamp to household timezone
         msg_text = format_agent_notification_text(event, inv, timezone_name="America/Chicago")
         self.assertNotIn("/var/folders", msg_text)
         self.assertNotIn("/Users", msg_text)
         self.assertNotIn("/tmp", msg_text)
         self.assertNotIn("snapshots/", msg_text)
-        self.assertIn("✓ Snapshot retrieved successfully for device demo-cam-living-room (captured at 2026-10-13T07:10:00Z).", msg_text)
+        self.assertIn("✓ Snapshot retrieved successfully for device demo-cam-living-room (captured 02:10 CDT).", msg_text)
+
+        # 1b. Without timezone or invalid timezone, format_evidence_text_for_caregiver falls back safely
+        fallback_text = format_evidence_text_for_caregiver(raw_snapshot_text, timezone_name=None)
+        self.assertIn("(captured at 2026-10-13T07:10:00Z)", fallback_text)
 
         # 2. Raw evidence in Investigation object is untouched
         self.assertEqual(inv.evidence[0].text, raw_snapshot_text)

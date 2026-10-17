@@ -42,7 +42,8 @@ def format_agent_notification_text(
     - Evidence list: ✓/✗ <tool text>
     - Recommendation prefixed with mode label
     """
-    tz = ZoneInfo(timezone_name)
+    effective_tz = event.get("timezone") or timezone_name
+    tz = ZoneInfo(effective_tz)
     occ_str = event.get("occurred_at", "")
     if occ_str:
         clean_str = occ_str.replace("Z", "+00:00")
@@ -57,7 +58,7 @@ def format_agent_notification_text(
     evidence_lines = []
     for item in investigation.evidence:
         mark = "✓" if item.ok else "✗"
-        clean_text = format_evidence_text_for_caregiver(item.text)
+        clean_text = format_evidence_text_for_caregiver(item.text, timezone_name=effective_tz)
         evidence_lines.append(f"{mark} {clean_text}")
     evidence_block = "\n".join(evidence_lines) if evidence_lines else "None recorded."
 

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import json
 import os
 import sys
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     from scripts.probe_ring import load_env
@@ -26,109 +27,113 @@ from src.threshold.store import init_db, ms_to_iso
 
 def run_ring_check() -> int:
     """Execute ring-check diagnostic subcommand against Ring Partner API."""
-    load_env(".env")
-
-    token = os.environ.get("RING_ACCESS_TOKEN") or os.environ.get("RING_TOKEN")
-    if not token or not token.strip():
-        print("ERROR: RING_ACCESS_TOKEN is not set in environment or .env file.", file=sys.stderr)
-        print("Please configure RING_ACCESS_TOKEN in .env or run with a valid Playground token.", file=sys.stderr)
-        return 1
-
-    token = token.strip()
-    client = RingClient(access_token=token)
-
-    print("=" * 80)
-    print("THRESHOLD RING PARTNER API DIAGNOSTIC (ring-check)")
-    print("=" * 80)
-
     try:
-        devices = client.list_devices()
-    except TokenExpired:
-        print("ERROR: Ring access token has expired (HTTP 401). Please generate a fresh token.", file=sys.stderr)
-        return 1
-    except RingAPIError as exc:
-        print(f"ERROR: Failed to list devices: {exc}", file=sys.stderr)
-        return 1
+        load_env(".env")
 
-    if not devices:
-        print("No devices discovered for this Ring account.")
-        return 0
+        token = os.environ.get("RING_ACCESS_TOKEN") or os.environ.get("RING_TOKEN")
+        if not token or not token.strip():
+            print("ERROR: RING_ACCESS_TOKEN is not set in environment or .env file.", file=sys.stderr)
+            print("Please configure RING_ACCESS_TOKEN in .env or run with a valid Playground token.", file=sys.stderr)
+            return 1
 
-    print(f"Discovered {len(devices)} device(s):\n")
+        token = token.strip()
+        client = RingClient(access_token=token)
 
-    for idx, dev in enumerate(devices, start=1):
-        dev_id = dev.get("id", "N/A")
-        attrs = dev.get("attributes", {})
-        dev_name = attrs.get("name", "Unnamed Device")
-        print(f"[{idx}] Device: {dev_name}")
-        print(f"    ID:   {dev_id}")
+        print("=" * 80)
+        print("THRESHOLD RING PARTNER API DIAGNOSTIC (ring-check)")
+        print("=" * 80)
 
-        # Device status
         try:
-            status_obj = client.get_device_status(dev_id)
-            s_attrs = status_obj.get("attributes", {})
-            online = s_attrs.get("online", False)
-            reported_at = s_attrs.get("reported_at", "N/A")
-            state_str = "ONLINE (Healthy)" if online else "OFFLINE"
-            print(f"    Status:      {state_str}")
-            print(f"    Reported At: {reported_at}")
-        except Exception as e:
-            print(f"    Status:      Failed to fetch ({e})")
+            devices = client.list_devices()
+        except TokenExpired:
+            print("ERROR: Ring access token has expired (HTTP 401). Please generate a fresh token.", file=sys.stderr)
+            return 1
+        except RingAPIError as exc:
+            print(f"ERROR: Failed to list devices: {exc}", file=sys.stderr)
+            return 1
 
-        # Recent history
-        try:
-            history = client.get_event_history(dev_id)
-            print(f"    Recent Events ({len(history)} recorded):")
-            if not history:
-                print("      (No events recorded)")
-            else:
-                for ev in history[:5]:  # show up to 5 recent events
-                    ev_id = ev.get("id", "")
-                    short_id = ev_id[-16:] if len(ev_id) > 16 else ev_id
-                    ev_attrs = ev.get("attributes", {})
-                    etype = ev_attrs.get("event_type", "unknown")
-                    start_ms = ev_attrs.get("start")
-                    start_str = ms_to_iso(start_ms) if start_ms else "N/A"
-                    print(f"      - {start_str} | type: {etype} (id: ...{short_id})")
-        except Exception as e:
-            print(f"    Events:      Failed to fetch ({e})")
+        if not devices:
+            print("No devices discovered for this Ring account.")
+            return 0
 
-        print("-" * 80)
+        print(f"Discovered {len(devices)} device(s):\n")
 
-    # Latest snapshot in the last 24h check
-    if devices:
-        target_dev_id = devices[0].get("id")
-        try:
-            snap_bytes, captured_ms = client.get_latest_snapshot(target_dev_id, lookback_hours=24, deadline_seconds=5.0)
-            if captured_ms:
-                dt_utc = datetime.fromtimestamp(captured_ms / 1000.0, tz=timezone.utc)
-                dt_local = dt_utc.astimezone()
-                local_time_str = dt_local.strftime("%Y-%m-%d %H:%M:%S %Z")
-                now_dt = datetime.now(timezone.utc)
-                diff_sec = max(0, int((now_dt - dt_utc).total_seconds()))
-                if diff_sec < 60:
-                    age_str = "just now"
-                elif diff_sec < 3600:
-                    age_str = f"{diff_sec // 60}m ago"
-                elif diff_sec < 86400:
-                    age_str = f"{diff_sec // 3600}h ago"
+        for idx, dev in enumerate(devices, start=1):
+            dev_id = dev.get("id", "N/A")
+            attrs = dev.get("attributes", {})
+            dev_name = attrs.get("name", "Unnamed Device")
+            print(f"[{idx}] Device: {dev_name}")
+            print(f"    ID:   {dev_id}")
+
+            # Device status
+            try:
+                status_obj = client.get_device_status(dev_id)
+                s_attrs = status_obj.get("attributes", {})
+                online = s_attrs.get("online", False)
+                reported_at = s_attrs.get("reported_at", "N/A")
+                state_str = "ONLINE (Healthy)" if online else "OFFLINE"
+                print(f"    Status:      {state_str}")
+                print(f"    Reported At: {reported_at}")
+            except Exception as e:
+                print(f"    Status:      Failed to fetch ({e})")
+
+            # Recent history
+            try:
+                history = client.get_event_history(dev_id)
+                print(f"    Recent Events ({len(history)} recorded):")
+                if not history:
+                    print("      (No events recorded)")
                 else:
-                    age_str = f"{diff_sec // 86400}d ago"
-                print(f"Latest snapshot in the last 24h: HTTP 200, {len(snap_bytes)} bytes, captured {local_time_str} ({age_str})")
-            else:
-                print(f"Latest snapshot in the last 24h: HTTP 200, {len(snap_bytes)} bytes, captured (time unknown)")
-        except MediaUnavailable as exc:
-            if exc.status_code == 416 or (exc.code and "416" in exc.code) or "416" in str(exc) or "MEDIA_NOT_FOUND" in str(exc):
-                print("Latest snapshot in the last 24h: none in the last 24h (416)")
-            else:
-                print(f"Latest snapshot in the last 24h: unavailable ({exc.reason})")
-        except Exception as exc:
-            if "416" in str(exc):
-                print("Latest snapshot in the last 24h: none in the last 24h (416)")
-            else:
-                print(f"Latest snapshot in the last 24h: failed ({exc})")
+                    for ev in history[:5]:  # show up to 5 recent events
+                        ev_id = ev.get("id", "")
+                        short_id = ev_id[-16:] if len(ev_id) > 16 else ev_id
+                        ev_attrs = ev.get("attributes", {})
+                        etype = ev_attrs.get("event_type", "unknown")
+                        start_ms = ev_attrs.get("start")
+                        start_str = ms_to_iso(start_ms) if start_ms else "N/A"
+                        print(f"      - {start_str} | type: {etype} (id: ...{short_id})")
+            except Exception as e:
+                print(f"    Events:      Failed to fetch ({e})")
 
-    return 0
+            print("-" * 80)
+
+        # Latest snapshot in the last 24h check
+        if devices:
+            target_dev_id = devices[0].get("id")
+            try:
+                snap_bytes, captured_ms = client.get_latest_snapshot(target_dev_id, lookback_hours=24, deadline_seconds=5.0)
+                if captured_ms:
+                    dt_utc = datetime.fromtimestamp(captured_ms / 1000.0, tz=timezone.utc)
+                    dt_local = dt_utc.astimezone()
+                    local_time_str = dt_local.strftime("%Y-%m-%d %H:%M:%S %Z")
+                    now_dt = datetime.now(timezone.utc)
+                    diff_sec = max(0, int((now_dt - dt_utc).total_seconds()))
+                    if diff_sec < 60:
+                        age_str = "just now"
+                    elif diff_sec < 3600:
+                        age_str = f"{diff_sec // 60}m ago"
+                    elif diff_sec < 86400:
+                        age_str = f"{diff_sec // 3600}h ago"
+                    else:
+                        age_str = f"{diff_sec // 86400}d ago"
+                    print(f"Latest snapshot in the last 24h: HTTP 200, {len(snap_bytes)} bytes, captured {local_time_str} ({age_str})")
+                else:
+                    print(f"Latest snapshot in the last 24h: HTTP 200, {len(snap_bytes)} bytes, captured (time unknown)")
+            except MediaUnavailable as exc:
+                if exc.status_code == 416 or (exc.code and "416" in exc.code) or "416" in str(exc) or "MEDIA_NOT_FOUND" in str(exc):
+                    print("Latest snapshot in the last 24h: none in the last 24h (416)")
+                else:
+                    print(f"Latest snapshot in the last 24h: unavailable ({exc.reason})")
+            except Exception as exc:
+                if "416" in str(exc):
+                    print("Latest snapshot in the last 24h: none in the last 24h (416)")
+                else:
+                    print(f"Latest snapshot in the last 24h: failed ({exc})")
+
+        return 0
+    except ZoneInfoNotFoundError:
+        print("Timezone data missing: pip install tzdata, or run on macOS/Linux", file=sys.stderr)
+        return 1
 
 
 def run_init_command(args: argparse.Namespace) -> int:
@@ -224,76 +229,80 @@ def run_seed_command(args: argparse.Namespace) -> int:
 
 def run_daemon_command(args: argparse.Namespace) -> int:
     """Execute daemon background service."""
-    load_env(".env")
+    try:
+        load_env(".env")
 
-    # Check for config file to auto-populate defaults
-    cfg: Optional[ThresholdConfig] = None
-    config_path = find_config_file(args.config)
-    if config_path:
-        try:
-            cfg = load_config_file(config_path)
-            print(f"[CONFIG] Loaded household configuration from '{config_path}'")
-        except Exception as exc:
-            print(f"[WARN] Failed to load config file '{config_path}': {exc}", file=sys.stderr)
+        # Check for config file to auto-populate defaults
+        cfg: Optional[ThresholdConfig] = None
+        config_path = find_config_file(args.config)
+        if config_path:
+            try:
+                cfg = load_config_file(config_path)
+                print(f"[CONFIG] Loaded household configuration from '{config_path}'")
+            except Exception as exc:
+                print(f"[WARN] Failed to load config file '{config_path}': {exc}", file=sys.stderr)
 
-    # CLI args override config file if explicitly provided, else use config file, else defaults
-    household = args.household if args.household is not None else (cfg.household if cfg else "Threshold Household")
-    timezone_name = args.timezone if args.timezone is not None else (cfg.timezone if cfg else "America/Chicago")
-    poll_interval = args.poll_interval if args.poll_interval is not None else (cfg.poll_interval_seconds if cfg else 300.0)
-    tick_interval = args.tick_interval if args.tick_interval is not None else (cfg.tick_interval_seconds if cfg else 60.0)
-    cb_interval = cfg.callback_interval_seconds if cfg else 2.0
+        # CLI args override config file if explicitly provided, else use config file, else defaults
+        household = args.household if args.household is not None else (cfg.household if cfg else "Threshold Household")
+        timezone_name = args.timezone if args.timezone is not None else (cfg.timezone if cfg else "America/Chicago")
+        poll_interval = args.poll_interval if args.poll_interval is not None else (cfg.poll_interval_seconds if cfg else 300.0)
+        tick_interval = args.tick_interval if args.tick_interval is not None else (cfg.tick_interval_seconds if cfg else 60.0)
+        cb_interval = cfg.callback_interval_seconds if cfg else 2.0
 
-    conn = init_db(args.db)
+        conn = init_db(args.db)
 
-    # Auto-seed routines from config if config was loaded
-    if cfg and cfg.routines:
-        seed_routines_from_config(conn, cfg)
+        # Auto-seed routines from config if config was loaded
+        if cfg and cfg.routines:
+            seed_routines_from_config(conn, cfg)
 
-    # Ring Client setup
-    token = os.environ.get("RING_ACCESS_TOKEN") or os.environ.get("RING_TOKEN")
-    ring_client = None
-    if token and token.strip() and not args.no_poll:
-        ring_client = RingClient(access_token=token.strip())
+        # Ring Client setup
+        token = os.environ.get("RING_ACCESS_TOKEN") or os.environ.get("RING_TOKEN")
+        ring_client = None
+        if token and token.strip() and not args.no_poll:
+            ring_client = RingClient(access_token=token.strip())
 
-    # Notifier setup
-    tg_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    tg_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if tg_token and tg_chat_id and tg_token.strip() and tg_chat_id.strip():
-        notifier = TelegramNotifier(
-            bot_token=tg_token.strip(),
-            chat_id=tg_chat_id.strip(),
-            ring_client=ring_client,
+        # Notifier setup
+        tg_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        tg_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        if tg_token and tg_chat_id and tg_token.strip() and tg_chat_id.strip():
+            notifier = TelegramNotifier(
+                bot_token=tg_token.strip(),
+                chat_id=tg_chat_id.strip(),
+                ring_client=ring_client,
+            )
+        else:
+            notifier = ConsoleNotifier(ring_client=ring_client)
+
+        dashboard_enabled = not getattr(args, "no_dashboard", False)
+        dashboard_port = getattr(args, "dashboard_port", 8080)
+        dashboard_host = getattr(args, "dashboard_host", "127.0.0.1")
+
+        config = DaemonConfig(
+            db_path=args.db,
+            poll_interval_seconds=float(poll_interval),
+            tick_interval_seconds=float(tick_interval),
+            callback_interval_seconds=float(cb_interval),
+            household_name=household,
+            timezone_name=timezone_name,
+            enable_polling=not args.no_poll,
+            dashboard_enabled=dashboard_enabled,
+            dashboard_port=dashboard_port,
+            dashboard_host=dashboard_host,
+            agent=cfg.agent if cfg else None,
         )
-    else:
-        notifier = ConsoleNotifier(ring_client=ring_client)
 
-    dashboard_enabled = not getattr(args, "no_dashboard", False)
-    dashboard_port = getattr(args, "dashboard_port", 8080)
-    dashboard_host = getattr(args, "dashboard_host", "127.0.0.1")
+        daemon = ThresholdDaemon(
+            config=config,
+            ring_client=ring_client,
+            notifier=notifier,
+            conn=conn,
+        )
 
-    config = DaemonConfig(
-        db_path=args.db,
-        poll_interval_seconds=float(poll_interval),
-        tick_interval_seconds=float(tick_interval),
-        callback_interval_seconds=float(cb_interval),
-        household_name=household,
-        timezone_name=timezone_name,
-        enable_polling=not args.no_poll,
-        dashboard_enabled=dashboard_enabled,
-        dashboard_port=dashboard_port,
-        dashboard_host=dashboard_host,
-        agent=cfg.agent if cfg else None,
-    )
-
-    daemon = ThresholdDaemon(
-        config=config,
-        ring_client=ring_client,
-        notifier=notifier,
-        conn=conn,
-    )
-
-    max_ticks = 1 if args.once else None
-    return daemon.run(max_ticks=max_ticks)
+        max_ticks = 1 if args.once else None
+        return daemon.run(max_ticks=max_ticks)
+    except ZoneInfoNotFoundError:
+        print("Timezone data missing: pip install tzdata, or run on macOS/Linux", file=sys.stderr)
+        return 1
 
 
 def run_test_alert_command(args: argparse.Namespace) -> int:
@@ -452,6 +461,9 @@ def run_demo_cli(args: argparse.Namespace) -> int:
     try:
         res = run_demo_pipeline(pace=pace, no_color=no_color, serve=serve)
         return 0 if res.get("success", False) else 1
+    except ZoneInfoNotFoundError:
+        print("Timezone data missing: pip install tzdata, or run on macOS/Linux", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         print("\nDemo stopped cleanly.")
         return 0
