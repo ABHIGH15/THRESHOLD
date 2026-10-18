@@ -1,7 +1,7 @@
 """
 Synthetic test fixtures for Phase 1.
 
-Covers the four scenarios from EXECUTION_PLAN.md Phase 0 Task 8:
+Covers the four scenarios:
   1. Normal day — all routines satisfied
   2. Missed pickup — routine not satisfied within window
   3. 3am door-open — ambiguous event outside any routine window

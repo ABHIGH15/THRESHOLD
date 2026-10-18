@@ -1,7 +1,7 @@
 """
 Phase 1 tests — rules-only triage engine against synthetic fixtures.
 
-Definition of Done (EXECUTION_PLAN.md Section 6):
+Definition of Done:
   [x] Every synthetic fixture scenario produces the tier the scenario was designed to produce
       — shown as a pass/fail table, not a verbal claim.
   [x] The "fire once, not on every tick" edge-detection is tested explicitly:

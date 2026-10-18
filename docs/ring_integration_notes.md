@@ -2,7 +2,7 @@
 
 This document compiles integration observations, friction points, and product feedback based on hands-on integration with the Ring Partner API (`api.amazonvision.com`) and the Ring Developer Portal Playground during the October 2026 Hackathon.
 
-Every observation is cited directly from verified response artifacts under `docs/ring_samples/` or `BUILD_LOG.md`.
+Every observation is cited directly from verified response artifacts under `docs/ring_samples/` or `docs/dev/BUILD_LOG.md`.
 
 ---
 
