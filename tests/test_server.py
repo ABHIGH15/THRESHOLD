@@ -349,6 +349,47 @@ class TestWebhookServer(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(data.decode("utf-8")), {"status": "ok"})
 
+    def test_missing_id_different_payloads_two_rows(self):
+        """
+        Two distinct webhooks without request_id or data.id must not collide on 'missing_id'.
+        Each should receive a unique hash-derived external_id and both be stored in events.
+        """
+        payload1 = json.dumps({
+            "data": {
+                "type": "motion_detected",
+                "attributes": {
+                    "source": "cam_front",
+                    "timestamp": 1791814643000,
+                }
+            }
+        }).encode("utf-8")
+        payload2 = json.dumps({
+            "data": {
+                "type": "motion_detected",
+                "attributes": {
+                    "source": "cam_back",
+                    "timestamp": 1791814644000,
+                }
+            }
+        }).encode("utf-8")
+
+        sig1 = compute_signature(payload1, self.secret)
+        st1, _ = self._send_request("POST", "/webhooks/ring", payload1, {"X-Signature": sig1})
+        self.assertEqual(st1, 200)
+
+        sig2 = compute_signature(payload2, self.secret)
+        st2, _ = self._send_request("POST", "/webhooks/ring", payload2, {"X-Signature": sig2})
+        self.assertEqual(st2, 200)
+
+        conn = get_connection(self.db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT source, external_id, device_id FROM events WHERE source = 'webhook'")
+        rows = cur.fetchall()
+        conn.close()
+
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[0][1], rows[1][1])
+
 
 if __name__ == "__main__":
     unittest.main()

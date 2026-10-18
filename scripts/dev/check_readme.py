@@ -124,6 +124,22 @@ def check_top_30_lines(readme_content: str) -> list[str]:
     return errors
 
 
+def check_ring_sample_citations(content: str) -> list[str]:
+    """Verify that every docs/ring_samples/<file> cited in links or backticks is tracked in git."""
+    errors = []
+    tracked = get_tracked_files()
+    samples = set(re.findall(r'docs/ring_samples/([A-Za-z0-9_.-]+)', content))
+    for s in sorted(samples):
+        if not s or s in (".", ".."):
+            continue
+        rel_path = f"docs/ring_samples/{s}"
+        if rel_path not in tracked:
+            errors.append(f"Untracked sample file citation: '{rel_path}' is not tracked in git.")
+        elif not os.path.exists(os.path.join(PROJECT_ROOT, rel_path)):
+            errors.append(f"Missing sample file on disk: '{rel_path}' does not exist.")
+    return errors
+
+
 def main() -> int:
     target_arg = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "README.md"
     readme_path = os.path.join(PROJECT_ROOT, target_arg) if not os.path.isabs(target_arg) else target_arg
@@ -169,6 +185,20 @@ def main() -> int:
         print(f"  [FAIL] Environment variables ({len(env_errs)} mismatched)")
     else:
         print("  [PASS] Environment variables (all README variables match .env.example)")
+
+    # Check 5: Ring sample citations (README and docs/ring_integration_notes.md)
+    sample_errs = check_ring_sample_citations(content)
+    notes_path = os.path.join(PROJECT_ROOT, "docs", "ring_integration_notes.md")
+    if os.path.exists(notes_path) and readme_path.endswith("README.md"):
+        with open(notes_path, "r", encoding="utf-8") as f:
+            notes_content = f.read()
+        sample_errs.extend(check_ring_sample_citations(notes_content))
+
+    if sample_errs:
+        all_errors.extend(sample_errs)
+        print(f"  [FAIL] Ring sample citations ({len(sample_errs)} untracked or missing)")
+    else:
+        print("  [PASS] Ring sample citations (all cited docs/ring_samples/ files are tracked in git)")
 
     if all_errors:
         print("\nErrors encountered:")

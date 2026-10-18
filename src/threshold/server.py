@@ -11,6 +11,7 @@ Endpoints:
 """
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
 import json
 import logging
 import os
@@ -125,7 +126,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
         attrs = data.get("attributes", {}) if isinstance(data, dict) else {}
 
         # External ID / Idempotency Key
-        external_id = meta.get("request_id") or data.get("id") or "missing_id"
+        body_hash = hashlib.sha256(raw_body).hexdigest()[:32]
+        external_id = meta.get("request_id") or data.get("id") or body_hash
 
         # Event type
         raw_event_type = data.get("type", "unrecognized")

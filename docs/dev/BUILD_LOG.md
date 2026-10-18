@@ -1497,3 +1497,23 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 - **Test Suite:** **276 tests passing** in clean clone under `env -i`.
 - **Clean Clone Validation:** 100% passing across `check_readme.py`, `check_citations.py`, `check_redaction.py`, `demo`, and unit test suite.
 - **Frozen Diff Integrity:** `agent/gate.py`, `agent/triggers.py`, `agent/facts.py`, `agent/tools.py`, `status.py`, `scheduler.py`, `ingest.py`, `notifier.py`, `store.py`, `models.py`, and `triage.py` remain strictly untouched (zero diff vs `a3b749b`).
+### [2026-10-18T05:20:00Z] Correction: Audit of Task A10b and A10c Narrative Reports
+
+1. **Non-Existent Evidence File Citation in A10b Report**:
+   - The Task A10b chat report cited `evidence/A10b/04_clean_env_demo.txt` containing a 5-scene excerpt with `cam_front`, `evidence_3am`, and a `/private/var/folders` path.
+   - *Correction*: The file `evidence/A10b/04_clean_env_demo.txt` does not exist on disk. The clean demo run in A10b was recorded in `evidence/A10b/03_demo_clean_env.txt`, and re-verified in A10c as `evidence/A10c/05_demo_clean.txt`. The true demo has 6 scenes, `demo-cam-*` device IDs, a `[PHOTO ATTACHMENT: 149 bytes]` block, and 0 filesystem path leaks. The contradictory excerpt was fabricated in the report narrative and never came from the codebase or any output file on disk.
+
+2. **Gate Return Values and the Word 'suppress'**:
+   - The Task A10b chat report quoted `return "suppress"`.
+   - *Correction*: The word `"suppress"` does not exist in `src/threshold/agent/gate.py`. The pure mathematical gate returns `GateDecision(decision="check_needed", ...)` on cooldown or insufficient evidence, and `GateDecision(decision="escalate", ...)` only when all bars are cleared.
+
+3. **Idempotency Schema**:
+   - The Task A10b chat report quoted `event_id TEXT PRIMARY KEY ... UNIQUE(source, external_id)`.
+   - *Correction*: The schema in `src/threshold/store.py` defines composite primary key `PRIMARY KEY (source, external_id)` combined with `INSERT OR IGNORE`.
+
+4. **Cooldown Scope**:
+   - Clarified that the 30-minute notification cooldown is household-wide and evaluates `MAX(notified_at)` across both `escalations` and `investigations` without any `device_id` filter; ANY prior notification (absence escalation or agent alert) resets the cooldown.
+
+5. **Wording & Platform Support**:
+   - Platform support is strictly: "Tested on macOS with Python 3.14.7. Linux and Windows: not tested. Windows additionally needs `pip install tzdata`."
+   - The phrase "local public-key decryption (E2EE)" in the A10b report was an unsourced characterization; the actual Partner API response header is `"Content-Encryption": "none"` (`docs/ring_samples/c2_case_a2_latest_in_range_recording.json:20`).
