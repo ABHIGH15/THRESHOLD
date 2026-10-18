@@ -1533,3 +1533,43 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 - **Evidence Files:** Saved under `evidence/A10f/` (`01_notifier_contract_red.txt` through `10_live_photo_check_dry_run.txt`).
 - **Test Suite:** **287 tests passing** (279 baseline + 2 new tests in `test_agent.py` + 6 new tests in `test_live_photo_check.py`).
 - **All Citations & Redaction:** 21 symbols, 22 test citations verified (exit 0); 94 files scanned for secrets (0 hits).
+
+### [2026-10-18T15:25:00Z] Task A10g: Live-Path Assumptions Verified
+
+#### 1. Scope & Execution Overview
+- **STEP 1 — Method Names & Call Contract Verification**:
+  - Traced and verified exact method names across modules:
+    - `RingClient.get_snapshot`: `src/threshold/ring_client.py:352`.
+    - `RingClient.get_latest_snapshot`: `src/threshold/ring_client.py:412`.
+    - `load_env`: `scripts/probe_ring.py:50` and fallback in `scripts/live_photo_check.py:31`.
+    - `scripts/live_photo_check.py` invokes `client.list_devices()`, `client.get_latest_snapshot(...)` (fallback `client.get_snapshot(...)`), and `TelegramNotifier(bot_token, chat_id)` with `deliver_agent_notification`.
+  - Added unit test `test_real_client_and_notifier_contracts_without_network` in `tests/test_live_photo_check.py` asserting that real `RingClient` and `TelegramNotifier` instantiate without network and possess all called methods/attributes (`RingClient.list_devices`, `RingClient.get_latest_snapshot`, `RingClient.get_snapshot`; `TelegramNotifier.chat_id`, `TelegramNotifier.send_photo`, `TelegramNotifier._make_request`).
+  - Rebuilt mocked `--send` tests in `tests/test_live_photo_check.py` with `create_autospec(RingClient, instance=True)` and `create_autospec(TelegramNotifier, instance=True)`.
+  - Demonstrated RED (`AttributeError: Mock object has no attribute 'get_latest_snapshot_bogus'` -> `1 != 0`) saved in `evidence/A10g/02_step1_autospec_red.txt` (exit=1), then restored to GREEN in `evidence/A10g/03_step1_autospec_green.txt` (exit=0).
+- **STEP 2 — HTTP 416 Realism**:
+  - Confirmed `RingClient.get_latest_snapshot` raises `MediaUnavailable("No media found in range", code="MEDIA_NOT_FOUND", status_code=416)` when download host returns 416 (`src/threshold/ring_client.py:538-539`), matching existing test `test_get_latest_snapshot_416_on_get_raises_media_unavailable` (`tests/test_ring_client.py:463-469`).
+  - Updated `test_send_missing_media_416_guidance` in `tests/test_live_photo_check.py` to raise `MediaUnavailable(..., status_code=416)` and asserted output contains verbatim guidance: `simulate live view in the Playground, wait ~2 minutes, retry.`
+- **STEP 3 — Over-Limit Payload Contract with Real TelegramNotifier**:
+  - Extended `test_real_telegram_notifier_over_limit_contract` in `tests/test_agent.py`:
+    - Inspected captured `sendPhoto` multipart request: verified `name="chat_id"` contains `999888`, `name="parse_mode"` contains `HTML`, and extracted `caption` is <= 200 chars.
+    - Inspected captured `sendMessage` JSON request: verified `chat_id == notifier.chat_id`, `parse_mode == "HTML"`, and `text == format_agent_notification_text(event, inv_a, "America/Chicago")`.
+    - Verified exactly 1 `sendPhoto` + 1 `sendMessage` on success.
+    - Verified case (b2) where `sendMessage` fails: `deliv_b2 == False`, `notified_at` is None, and fallback triggers exactly 2 `sendMessage` attempts (initial over-limit attempt + 1 fallback retry).
+    - Documented attribute alignment: `TelegramNotifier.__init__` assigns `self.chat_id = str(chat_id)` (`src/threshold/notifier.py:485`) and `runner.py` reads `getattr(notifier, "chat_id", "")` at lines 144 and 184.
+  - Saved test output in `evidence/A10g/04_over_limit_contract_green.txt` (exit=0).
+- **STEP 4 — --long Flag & Dual-Delivery Testing**:
+  - Added `--long` CLI flag to `scripts/live_photo_check.py` (functional for both `--dry-run` and `--send`): injects 4 extra synthetic evidence lines exceeding the 1000-character threshold to exercise the over-limit dual-delivery branch.
+  - Verified dry run output contains verbatim: `Delivery Branch:    Over-limit (photo + separate message)`.
+  - Added unit tests `test_dry_run_long_flag_over_limit_branch`, `test_main_cli_long_flag`, and `test_send_mocked_ring_and_telegram_long` verifying `sendPhoto` followed by `_make_request("sendMessage", ...)` dispatch.
+  - Saved dry run output in `evidence/A10g/05_dry_run_long.txt` (exit=0).
+- **STEP 5 — Housekeeping & Clean-Clone Validation**:
+  - Captured `git show --stat 18d2faa` in `evidence/A10g/06_git_show_stat_18d2faa.txt`.
+  - Verified `git diff --numstat 18d2faa~1 18d2faa -- docs/dev/BUILD_LOG.md` (30 additions, 0 deletions) in `evidence/A10g/07_build_log_numstat.txt`.
+  - Documented `NOTES_ALLOWED_TOKENS` allowlist entries with 1-line justifications in report.
+  - Verified test suite: 291/291 passing. Clean clone passes judge dry run and 4 CI commands under `env -i`.
+
+#### 2. Verification Summary
+- **Evidence Files:** Saved under `evidence/A10g/` (`01_names_and_calls.txt` through `09_ci_clean_clone.txt`).
+- **Test Suite:** **291 tests passing** (288 baseline + 3 new tests in `test_live_photo_check.py`).
+- **Redaction Scan:** 96 tracked files scanned with 0 leaks (`scripts/dev/check_redaction.py`).
+- **All Mechanical Checks:** `scripts/dev/check_readme.py` passes.

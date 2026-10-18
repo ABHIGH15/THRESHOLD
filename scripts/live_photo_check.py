@@ -123,6 +123,7 @@ def build_synthetic_investigation_and_event(
     captured_at_iso: str,
     now: datetime,
     timezone_name: str = "America/Chicago",
+    long: bool = False,
 ) -> Tuple[Dict[str, Any], Investigation]:
     """Construct a clearly labeled synthetic Investigation and Event for testing."""
     try:
@@ -158,6 +159,23 @@ def build_synthetic_investigation_and_event(
         )
     ]
 
+    if long:
+        extra_descs = [
+            "Corroborating sensor analysis: Secondary motion in living room and hallway confirmed unexpected activity outside normal sleep hours between 02:00 and 02:15 CDT.",
+            "Household history correlation: No prior false alarms or night wanderings recorded for this household in SQLite corrections within the preceding 30 days.",
+            "Door contact sensor telemetry: Exterior front entry perimeter was accessed at 02:12 CDT without corresponding return motion detected on interior cameras.",
+            "Environmental baseline check: Motion timestamps across multiple zones indicate sequential movement towards front exterior threshold rather than routine bathroom visit.",
+        ]
+        for idx, desc in enumerate(extra_descs, start=1):
+            evidence.append(
+                Evidence(
+                    tool="check_routine_status",
+                    call_id=f"call_extra_{idx}",
+                    ok=True,
+                    text=desc,
+                )
+            )
+
     trace = [
         {
             "type": "result",
@@ -174,7 +192,7 @@ def build_synthetic_investigation_and_event(
         event_key="evt_live_photo_check",
         mode="live path test (synthetic investigation)",
         provider_name="live_photo_check",
-        steps=1,
+        steps=len(evidence),
         elapsed_ms=0,
         tier="check_needed",
         recommendation="LIVE PATH TEST — not a real event",
@@ -190,6 +208,7 @@ def run_dry_run(
     device_id: str = "demo-cam-front-door",
     timezone_name: str = "America/Chicago",
     snapshots_dir: str = "snapshots",
+    long: bool = False,
 ) -> int:
     """Execute offline dry-run validating HTML and character counts without network calls."""
     os.makedirs(snapshots_dir, exist_ok=True)
@@ -206,6 +225,7 @@ def run_dry_run(
         captured_at_iso=captured_iso,
         now=now,
         timezone_name=timezone_name,
+        long=long,
     )
 
     message_text = format_agent_notification_text(event, inv, timezone_name)
@@ -228,7 +248,7 @@ def run_dry_run(
     print(f"Separate Text:      {len(message_text)} chars (limit: 4096)")
 
     if len(full_caption_raw) > 1000:
-        branch = "Over-limit branch (sendPhoto with <=200 char prefix + separate sendMessage)"
+        branch = "Over-limit (photo + separate message)"
     else:
         branch = "Standard branch (sendPhoto with full caption <=1000 chars)"
     print(f"Delivery Branch:    {branch}")
@@ -256,6 +276,7 @@ def run_send(
     snapshots_dir: str = "snapshots",
     ring_client: Optional[RingClient] = None,
     notifier: Optional[Any] = None,
+    long: bool = False,
 ) -> int:
     """Execute live snapshot retrieval and Telegram delivery with strict secret hygiene."""
     load_env(env_file)
@@ -369,6 +390,7 @@ def run_send(
         captured_at_iso=captured_iso,
         now=now,
         timezone_name=timezone_name,
+        long=long,
     )
 
     # 5. Deliver through real deliver_agent_notification
@@ -412,6 +434,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Execute live Ring snapshot retrieval and Telegram delivery.",
     )
     parser.add_argument(
+        "--long",
+        action="store_true",
+        default=False,
+        help="Inject extra synthetic evidence lines exceeding 1000 chars to exercise dual-delivery branch.",
+    )
+    parser.add_argument(
         "--device-id",
         type=str,
         default=None,
@@ -451,12 +479,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             timezone_name=args.timezone,
             env_file=args.env_file,
             snapshots_dir=args.snapshots_dir,
+            long=args.long,
         )
     else:
         return run_dry_run(
             device_id=args.device_id or "demo-cam-front-door",
             timezone_name=args.timezone,
             snapshots_dir=args.snapshots_dir,
+            long=args.long,
         )
 
 

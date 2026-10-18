@@ -16,7 +16,7 @@ import os
 import shutil
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import create_autospec, patch
 
 from scripts.live_photo_check import (
     main,
@@ -25,7 +25,8 @@ from scripts.live_photo_check import (
     validate_telegram_html,
     PLACEHOLDER_JPEG_BYTES,
 )
-from src.threshold.ring_client import MediaUnavailable, TokenExpired
+from src.threshold.notifier import TelegramNotifier
+from src.threshold.ring_client import MediaUnavailable, RingClient, TokenExpired
 
 
 class TestLivePhotoCheck(unittest.TestCase):
@@ -36,6 +37,20 @@ class TestLivePhotoCheck(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def test_real_client_and_notifier_contracts_without_network(self):
+        """Assert real RingClient and TelegramNotifier instantiate without network and possess required attributes."""
+        # Real RingClient
+        client = RingClient(access_token="fake_test_token")
+        self.assertTrue(callable(getattr(client, "list_devices", None)))
+        self.assertTrue(callable(getattr(client, "get_latest_snapshot", None)))
+        self.assertTrue(callable(getattr(client, "get_snapshot", None)))
+
+        # Real TelegramNotifier
+        notifier = TelegramNotifier(bot_token="fake_bot_token", chat_id="123456")
+        self.assertEqual(getattr(notifier, "chat_id", None), "123456")
+        self.assertTrue(callable(getattr(notifier, "send_photo", None)))
+        self.assertTrue(callable(getattr(notifier, "_make_request", None)))
 
     def test_dry_run_execution(self):
         """Verify dry-run completes offline with exit 0 and expected metrics."""
@@ -62,6 +77,22 @@ class TestLivePhotoCheck(unittest.TestCase):
         with open(placeholder, "rb") as f:
             self.assertEqual(f.read(), PLACEHOLDER_JPEG_BYTES)
 
+    def test_dry_run_long_flag_over_limit_branch(self):
+        """Verify --long flag exercises dual delivery over-limit branch in dry run."""
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ret = run_dry_run(
+                device_id="demo-cam-front-door",
+                timezone_name="America/Chicago",
+                snapshots_dir=self.temp_dir.name,
+                long=True,
+            )
+        output = buf.getvalue()
+        self.assertEqual(ret, 0)
+        self.assertIn("Delivery Branch:    Over-limit (photo + separate message)", output)
+        self.assertIn("Full Caption:       1041 chars (limit: 1024)", output)
+        self.assertIn("Result: DRY RUN PASSED (exit code 0)", output)
+
     def test_main_cli_default_dry_run(self):
         """Verify main() without flags runs dry-run by default."""
         buf = io.StringIO()
@@ -69,6 +100,16 @@ class TestLivePhotoCheck(unittest.TestCase):
             ret = main(["--dry-run", "--snapshots-dir", self.temp_dir.name])
         self.assertEqual(ret, 0)
         self.assertIn("DRY RUN PASSED", buf.getvalue())
+
+    def test_main_cli_long_flag(self):
+        """Verify main() accepts --long flag and exercises over-limit branch."""
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ret = main(["--dry-run", "--long", "--snapshots-dir", self.temp_dir.name])
+        self.assertEqual(ret, 0)
+        output = buf.getvalue()
+        self.assertIn("Delivery Branch:    Over-limit (photo + separate message)", output)
+        self.assertIn("DRY RUN PASSED", output)
 
     def test_html_validator_valid_and_invalid_tags(self):
         """Verify TelegramHTMLValidator accurately checks tags and balance."""
@@ -101,15 +142,16 @@ class TestLivePhotoCheck(unittest.TestCase):
         self.assertTrue(any("Mismatched tag" in e for e in errs4))
 
     def test_send_mocked_ring_and_telegram(self):
-        """Verify --send path retrieves image, saves to snapshots/, and dispatches to Telegram."""
-        mock_ring = MagicMock()
+        """Verify --send path retrieves image, saves to snapshots/, and dispatches to Telegram using autospec."""
+        mock_ring = create_autospec(RingClient, instance=True)
         mock_ring.list_devices.return_value = [{"id": "mock_cam_garden"}]
         mock_ring.get_latest_snapshot.return_value = (
             b"\xff\xd8\xff\xe0mock_snapshot_bytes\xff\xd9",
             1791875400000,
         )
 
-        mock_notifier = MagicMock()
+        mock_notifier = create_autospec(TelegramNotifier, instance=True)
+        mock_notifier.chat_id = "999888"
         mock_notifier.send_photo.return_value = {"ok": True, "result": {"message_id": 999}}
 
         buf_out = io.StringIO()
@@ -141,15 +183,51 @@ class TestLivePhotoCheck(unittest.TestCase):
         self.assertIn("LIVE PATH TEST — not a real event", kwargs["caption"])
         self.assertIn("✓ Snapshot retrieved from Ring for device mock_cam_garden", kwargs["caption"])
 
-    def test_send_missing_media_416_guidance(self):
-        """Verify 416 missing media error prints the specific retry guidance message."""
-        mock_ring = MagicMock()
-        mock_ring.list_devices.return_value = [{"id": "mock_cam_hallway"}]
-        mock_ring.get_latest_snapshot.side_effect = MediaUnavailable(
-            "HTTP 416 (Requested Range Not Satisfiable)", status_code=416
+    def test_send_mocked_ring_and_telegram_long(self):
+        """Verify --send with long=True dispatches photo plus separate text message via autospec."""
+        mock_ring = create_autospec(RingClient, instance=True)
+        mock_ring.list_devices.return_value = [{"id": "mock_cam_garden"}]
+        mock_ring.get_latest_snapshot.return_value = (
+            b"\xff\xd8\xff\xe0mock_snapshot_bytes\xff\xd9",
+            1791875400000,
         )
 
-        mock_notifier = MagicMock()
+        mock_notifier = create_autospec(TelegramNotifier, instance=True)
+        mock_notifier.chat_id = "999888"
+        mock_notifier.send_photo.return_value = {"ok": True, "result": {"message_id": 999}}
+        mock_notifier._make_request.return_value = {"ok": True, "result": {"message_id": 1000}}
+
+        buf_out = io.StringIO()
+        with redirect_stdout(buf_out):
+            ret = run_send(
+                device_id="mock_cam_garden",
+                hours=24,
+                timezone_name="America/Chicago",
+                snapshots_dir=self.temp_dir.name,
+                ring_client=mock_ring,
+                notifier=mock_notifier,
+                long=True,
+            )
+
+        output = buf_out.getvalue()
+        self.assertEqual(ret, 0)
+        self.assertIn("Telegram Dispatch:  SUCCESS (delivered=True)", output)
+        mock_notifier.send_photo.assert_called_once()
+        mock_notifier._make_request.assert_called_once()
+        endpoint, payload = mock_notifier._make_request.call_args[0]
+        self.assertEqual(endpoint, "sendMessage")
+        self.assertEqual(payload["chat_id"], "999888")
+        self.assertEqual(payload["parse_mode"], "HTML")
+
+    def test_send_missing_media_416_guidance(self):
+        """Verify 416 missing media error prints the specific retry guidance message."""
+        mock_ring = create_autospec(RingClient, instance=True)
+        mock_ring.list_devices.return_value = [{"id": "mock_cam_hallway"}]
+        mock_ring.get_latest_snapshot.side_effect = MediaUnavailable(
+            "No media found in range", code="MEDIA_NOT_FOUND", status_code=416
+        )
+
+        mock_notifier = create_autospec(TelegramNotifier, instance=True)
 
         buf_out = io.StringIO()
         buf_err = io.StringIO()

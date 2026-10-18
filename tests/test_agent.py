@@ -2499,13 +2499,16 @@ class TestAgentLibrary(unittest.TestCase):
 
         # Case (a): Over-limit (>1000 chars) successful delivery
         calls_a = []
+        captured_a = []
         def urlopen_mock_a(req, timeout=None):
             url = req.get_full_url() if hasattr(req, "get_full_url") else str(req)
             if "sendPhoto" in url:
                 calls_a.append("sendPhoto")
+                captured_a.append(("sendPhoto", req))
                 return MockHTTPResponse(b'{"ok": true, "result": {"message_id": 101}}')
             if "sendMessage" in url:
                 calls_a.append("sendMessage")
+                captured_a.append(("sendMessage", req))
                 return MockHTTPResponse(b'{"ok": true, "result": {"message_id": 102}}')
             raise ValueError(f"Unexpected url {url}")
 
@@ -2518,6 +2521,26 @@ class TestAgentLibrary(unittest.TestCase):
         self.assertTrue(deliv_a)
         self.assertEqual(calls_a.count("sendPhoto"), 1)
         self.assertEqual(calls_a.count("sendMessage"), 1)  # NO duplicate sendMessage
+
+        # Assert sendPhoto multipart payload
+        photo_req = [req for name, req in captured_a if name == "sendPhoto"][0]
+        photo_body = photo_req.data.decode("utf-8", errors="replace")
+        self.assertIn('name="chat_id"\r\n\r\n999888\r\n', photo_body)
+        self.assertIn('name="parse_mode"\r\n\r\nHTML\r\n', photo_body)
+        import re
+        caption_match = re.search(r'name="caption"\r\n\r\n(.*?)\r\n--', photo_body, re.DOTALL)
+        self.assertIsNotNone(caption_match)
+        caption_content = caption_match.group(1)
+        self.assertLessEqual(len(caption_content), 200)
+
+        # Assert sendMessage JSON payload
+        msg_req = [req for name, req in captured_a if name == "sendMessage"][0]
+        msg_payload = json.loads(msg_req.data.decode("utf-8"))
+        self.assertEqual(msg_payload["chat_id"], notifier_a.chat_id)
+        self.assertEqual(msg_payload["parse_mode"], "HTML")
+        expected_msg_text = format_agent_notification_text(event, inv_a, "America/Chicago")
+        self.assertEqual(msg_payload["text"], expected_msg_text)
+
         if deliv_a:
             conn.execute("UPDATE investigations SET notified_at = ? WHERE event_key = ?", (to_iso_timestamp(now), inv_a.event_key))
             conn.commit()
