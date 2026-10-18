@@ -18,7 +18,7 @@ Every observation is cited directly from verified response artifacts under `docs
 | 6 | **Sandbox Event History Types** | Event history in the sandbox contains only `event_type: "on_demand"`; simulated Playground motion does not appear in history queries. | `docs/ring_samples/event_history.json` (2026-10-12) | VERIFIED LIVE |
 | 7 | **Webhook Schema Attribute** | Documented webhook payloads use `data.attributes.sub_type` (e.g. `"human"`), distinct from event history enum naming. | Starter repo documentation (`ring-api-helloworld`) | DOC-VERIFIED (UNVERIFIED on live wire) |
 | 8 | **Non-Camera Devices Untested** | The sandbox account used lists 1 device, doorbell_v4; contact sensors and smart locks are absent from this account. | `docs/ring_samples/list_devices.json` (2026-10-13) | VERIFIED LIVE |
-| 9 | **Device Online Status Semantics** | In the sandbox environment and battery standby, `attributes.online: false` indicates idle sleep; system safety logic correctly downgrades to `STATUS_UNKNOWN` and suppresses escalations. | `docs/ring_samples/device_status.json` (2026-10-12) | VERIFIED LIVE |
+| 9 | **Device Online Status Semantics** | In the sandbox environment when a camera is idle, `attributes.online: false` reflects an idle state; system safety logic correctly downgrades to `STATUS_UNKNOWN` and suppresses escalations. | `docs/ring_samples/device_status.json` (2026-10-12) | VERIFIED LIVE |
 
 ---
 
@@ -66,21 +66,21 @@ Every observation is cited directly from verified response artifacts under `docs
 - **Product Suggestion:** Allow developers to instantiate simulated Ring Alarm contact sensors in the Developer Playground.
 
 ### Finding 7: Sandbox Device Online Semantics and Pipeline Fail-Safe Behavior
-- **Observation:** `GET /v1/devices/{id}/status` returns `attributes.online: false` when a sandbox device is idle or in low-power standby mode (`docs/ring_samples/device_status.json`).
+- **Observation:** `GET /v1/devices/{id}/status` returns `attributes.online: false` when a device is idle (`docs/ring_samples/device_status.json`). `docs/ring_samples/FINDINGS.md:35` records: `attributes.online: boolean (false when camera idle, true when live stream/session active)`.
 - **Code Trace & Behavioral Proof:**
-  1. `ring_client.py:613-623`: Reads `attrs.get("online", False)` and records `online=False` in `device_health`.
-  2. `scheduler.py:180-185`: If `not online`, returns `DeviceHealthRecord(last_event_at=None)`.
-  3. `models.py:99-100`: `DeviceHealthRecord.is_stale(now)` evaluates `last_event_at is None` and returns `True`.
-  4. `status.py:189-190`: When past the escalation deadline and `device_health.is_stale(now)`, `derive_status` returns `STATUS_UNKNOWN` instead of `STATUS_MISSED`.
-  5. `scheduler.py:275-285`: Routine evaluation only escalates `STATUS_MISSED`. Because the status is `STATUS_UNKNOWN`, exactly **0 absence escalations** are triggered.
-  6. `agent/facts.py:30-34`: Derives `device_online_fresh = False` because `is_online` is `False`.
-  7. `agent/gate.py:41-42`: Rule 3 enforces `if not facts.device_online_fresh: return GateDecision(decision="check_needed", reason_code="device_not_fresh")`. Any agent-proposed escalation is downgraded to `check_needed`.
+  1. `src/threshold/ring_client.py::poll_once`: Reads `attrs.get("online", False)` and records `online=False` in `device_health`.
+  2. `src/threshold/scheduler.py::build_device_health_record`: If `not online`, returns `DeviceHealthRecord(last_event_at=None)`.
+  3. `src/threshold/models.py::DeviceHealthRecord.is_stale`: Evaluates `last_event_at is None` and returns `True`.
+  4. `src/threshold/status.py::derive_status`: When past the escalation deadline and `device_health.is_stale(now)`, `derive_status` returns `STATUS_UNKNOWN` instead of `STATUS_MISSED`.
+  5. `src/threshold/scheduler.py::Scheduler.tick`: Routine evaluation only escalates `STATUS_MISSED`. Because the status is `STATUS_UNKNOWN`, exactly **0 absence escalations** are triggered.
+  6. `src/threshold/agent/facts.py::build_gate_facts`: Derives `device_online_fresh = False` because `is_online` is `False`.
+  7. `src/threshold/agent/gate.py::decide`: Rule 3 enforces `if not facts.device_online_fresh: return GateDecision(decision="check_needed", reason_code="device_not_fresh")`. Any agent-proposed escalation is downgraded to `check_needed`.
 - **Verification Test:** `tests.test_scheduler.TestSchedulerAbsenceEngine.test_offline_fresh_device_returns_unknown_zero_escalations_and_gate_checks_needed` proves that an idle device with `online=False` and fresh timestamps results in `STATUS_UNKNOWN`, 0 absence escalations, and gate `check_needed` (`device_not_fresh`).
-- **Architectural Options for Handling Idle/Standby Online State:**
+- **Architectural Options for Handling Idle Online State:**
   1. *Option 1 (Current Safe Baseline):* Treat `attributes.online: false` strictly as unconfirmed health. System fails safe by marking the routine `STATUS_UNKNOWN` and blocking automated absence escalations while keeping events visible on the dashboard.
-  2. *Option 2 (Timestamp & Event Correlation):* Differentiate deep disconnection from battery standby by examining `reported_at` or recent event history timestamps (`docs/ring_samples/event_history.json`). If `reported_at` is within the staleness window (e.g. < 2 hours), treat device as reachable for event reception.
-  3. *Option 3 (Active Health Probe / Sandbox Override):* Provide an active probe fallback (`POST /v1/devices/{id}/snapshot` or `client.get_snapshot`) or an environment configuration toggle (`RING_SANDBOX_IDLE_ONLINE=true`) to simulate active heartbeat during developer playground evaluation.
-- **Product Suggestion:** Document the semantics of `attributes.online` for battery-powered cameras vs wired devices, and provide a distinct standby status (e.g., `state: "standby"` vs `state: "offline"`).
+  2. *Option 2 (Timestamp & Event Correlation):* Differentiate deep disconnection from an idle state by examining `reported_at` or recent event history timestamps (`docs/ring_samples/event_history.json`). If `reported_at` is within the staleness window (e.g. < 2 hours), treat device as reachable for event reception.
+  3. *Option 3 (Active Health Probe):* Provide an active probe fallback (`RingClient.get_snapshot` via `media/image/download`) to verify camera responsiveness during evaluation.
+- **Product Suggestion:** Document the semantics of `attributes.online` during idle periods, and provide a distinct status enum (e.g., distinguishing idle reachability from offline disconnection).
 
 ---
 

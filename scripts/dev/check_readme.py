@@ -140,12 +140,56 @@ def check_ring_sample_citations(content: str) -> list[str]:
     return errors
 
 
+NOTES_ALLOWED_TOKENS = {
+    # Documentation file names
+    "BUILD_LOG",
+    # Ring API error strings and enums
+    "MEDIA_NOT_FOUND",
+    # Status constants
+    "STATUS_MISSED",
+    "STATUS_UNKNOWN",
+    # Redaction placeholders
+    "REDACTED_ACCOUNT_ID",
+    "REDACTED_DEVICE_ID",
+    "REDACTED_PRESIGNED_QUERY",
+}
+
+
+def check_notes_env_vars(notes_content: str) -> list[str]:
+    """Scan docs/ring_integration_notes.md for ALL_CAPS_WITH_UNDERSCORES tokens and require them in .env.example or allowlist."""
+    errors = []
+    env_example_path = os.path.join(PROJECT_ROOT, ".env.example")
+    example_vars = set()
+    if os.path.exists(env_example_path):
+        with open(env_example_path, "r", encoding="utf-8") as f:
+            example_vars = set(re.findall(r'^[A-Z0-9_]+', f.read(), re.MULTILINE))
+
+    tokens = set(re.findall(r'\b([A-Z0-9]+_[A-Z0-9_]+)\b', notes_content))
+    for t in sorted(tokens):
+        if t in NOTES_ALLOWED_TOKENS:
+            continue
+        if t not in example_vars:
+            errors.append(
+                f"Token '{t}' in integration notes is missing from .env.example and not in allowlist!"
+            )
+    return errors
+
+
 def main() -> int:
     target_arg = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "README.md"
     readme_path = os.path.join(PROJECT_ROOT, target_arg) if not os.path.isabs(target_arg) else target_arg
     if not os.path.exists(readme_path):
         print(f"FAIL: Target file not found at {readme_path}", file=sys.stderr)
         return 1
+
+    notes_arg_idx = -1
+    for i, a in enumerate(sys.argv):
+        if a == "--notes-file" and i + 1 < len(sys.argv):
+            notes_arg_idx = i + 1
+            break
+    notes_path = sys.argv[notes_arg_idx] if notes_arg_idx != -1 else os.path.join(PROJECT_ROOT, "docs", "ring_integration_notes.md")
+    if not os.path.isabs(notes_path):
+        notes_path = os.path.join(PROJECT_ROOT, notes_path)
 
     with open(readme_path, "r", encoding="utf-8") as f:
         content = f.read()
@@ -178,7 +222,7 @@ def main() -> int:
     else:
         print("  [PASS] Python commands (all scripts exist, all subcommands valid in --help)")
 
-    # Check 4: Env vars
+    # Check 4: Env vars (README)
     env_errs = check_env_vars(content)
     if env_errs:
         all_errors.extend(env_errs)
@@ -186,13 +230,22 @@ def main() -> int:
     else:
         print("  [PASS] Environment variables (all README variables match .env.example)")
 
-    # Check 5: Ring sample citations (README and docs/ring_integration_notes.md)
-    sample_errs = check_ring_sample_citations(content)
-    notes_path = os.path.join(PROJECT_ROOT, "docs", "ring_integration_notes.md")
-    if os.path.exists(notes_path) and readme_path.endswith("README.md"):
+    # Check 5: Env vars (Integration Notes)
+    if os.path.exists(notes_path):
         with open(notes_path, "r", encoding="utf-8") as f:
             notes_content = f.read()
-        sample_errs.extend(check_ring_sample_citations(notes_content))
+        notes_env_errs = check_notes_env_vars(notes_content)
+        if notes_env_errs:
+            all_errors.extend(notes_env_errs)
+            print(f"  [FAIL] Integration notes env vars ({len(notes_env_errs)} unrecognized)")
+        else:
+            print("  [PASS] Integration notes env vars (all ALL_CAPS_WITH_UNDERSCORES tokens match .env.example or allowlist)")
+
+    # Check 6: Ring sample citations (README and docs/ring_integration_notes.md)
+    sample_errs = check_ring_sample_citations(content)
+    if os.path.exists(notes_path):
+        with open(notes_path, "r", encoding="utf-8") as f:
+            sample_errs.extend(check_ring_sample_citations(f.read()))
 
     if sample_errs:
         all_errors.extend(sample_errs)

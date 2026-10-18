@@ -195,7 +195,7 @@ Model recommendations are never trusted blindly. The final verdict is determined
   SELECT MAX(notified_at) FROM escalations WHERE notified_at IS NOT NULL
   SELECT MAX(notified_at) FROM investigations WHERE notified_at IS NOT NULL
   ```
-  *(This is distinct from the per-device investigation trigger deduplication in `src/threshold/agent/triggers.py::is_ambiguous_event`, which queries `SELECT 1 FROM investigations WHERE device_id = ? AND created_at >= ? LIMIT 1`).* Tested in `tests.test_agent.TestAgentLibrary.test_gate_table_driven_all_conditions`.
+  *(This is distinct from the per-device investigation trigger deduplication in `src/threshold/agent/triggers.py::is_ambiguous_event`, which queries `SELECT 1 FROM investigations WHERE device_id = ? AND created_at >= ? LIMIT 1`).* Tested for household-wide multi-table evaluation in `tests.test_agent.TestAgentLibrary.test_build_gate_facts_cooldown_evaluates_latest_across_both_tables`, and for the 30-minute gate threshold in `tests.test_agent.TestAgentLibrary.test_gate_table_driven_all_conditions`.
 - **Velocity Limit:** Maximum 2 agent escalations per 6 hours (`tests.test_agent.TestAgentLibrary.test_gate_table_driven_all_conditions`).
 - **Delivery Hardening:** Over-limit (>1000 char) alerts send a photo with a short prefix caption followed by a full text message. If text delivery fails, it falls through to fallback text delivery, and `notified_at` is recorded in SQLite only on confirmed text delivery (`tests.test_agent.TestAgentLibrary.test_over_limit_delivery_combos_and_notified_at`).
 - If any check fails, the verdict is downgraded to `check_needed` without push alert.
@@ -262,15 +262,25 @@ Run Threshold in poller mode with embedded dashboard:
 python3 -m src.threshold run --config threshold.example.json --db threshold.db
 ```
 
+### 5. Optional Live Photo Path Check
+Prove the real Ring snapshot retrieval to Telegram photo delivery path by hand:
+```bash
+# Offline dry-run verification (placeholder JPEG, character counts, and HTML validation):
+python3 scripts/live_photo_check.py --dry-run
+
+# Live Ring snapshot retrieval and Telegram photo delivery (requires credentials in .env):
+python3 scripts/live_photo_check.py --send
+```
+
 ---
 
 ## 8. Test Suite
 
-Threshold includes 275 unit and integration tests requiring no external network connectivity:
+Threshold includes 287 unit and integration tests requiring no external network connectivity:
 ```bash
 python3 -m unittest discover -s tests -v
 ```
-- **Test Count:** 275 tests.
+- **Test Count:** 287 tests.
 - **Runtime:** ~50 seconds.
 - **Network Requirements:** Loopback sockets only (`127.0.0.1`); zero external requests.
 
@@ -286,7 +296,7 @@ In the interest of complete engineering honesty:
 5. **Replay Agent:** The shipped agent replays scripted step traces and does not perform dynamic natural-language reasoning over event context.
 6. **Single Household / Single Chat:** Current implementation supports a single household database and a single caregiver Telegram chat destination.
 7. **Unauthenticated Loopback Dashboard:** The web status dashboard is designed for local observation (`127.0.0.1`) and does not provide session authentication.
-8. **Timezone & DST Scope:** Unit tests verify standard transitions (e.g. America/Chicago CDT/CST and midnight-crossing windows in `src/threshold/status.py::derive_status`; tested in `tests.test_scheduler.TestSchedulerAbsenceEngine.test_us_fallback_dst_boundary`); arbitrary international boundary changes are untested.
+8. **Timezone & DST Scope:** Unit tests verify standard US transitions (e.g. America/New_York EDT/EST DST boundaries in `tests.test_scheduler.TestSchedulerAbsenceEngine.test_us_fallback_dst_boundary`, and America/Chicago CDT/CST routines in `src/threshold/status.py::derive_status`); arbitrary international boundary changes are untested.
 9. **Platform Testing:** Tested on macOS with Python 3.14.7 (`tests.test_platform.TestPlatformPreflight.test_demo_pipeline_zoneinfo_not_found_handling`). Linux and Windows: not tested. Windows additionally needs `pip install tzdata` for Python `zoneinfo` support.
 10. **Simulated Household Data:** The Dallas household, devices, and motion timestamps in the demo are fictional scenarios for presentation purposes.
 11. **Offline/Stale Device Absence Suppression:** A stale or offline (`STATUS_UNKNOWN`) device produces a dashboard state but NO push notification; Threshold refuses to claim absence from unverified data (`tests.test_scheduler.TestSchedulerAbsenceEngine.test_offline_fresh_device_returns_unknown_zero_escalations_and_gate_checks_needed`).

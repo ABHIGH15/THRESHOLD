@@ -48,7 +48,7 @@ from src.threshold.agent.tools import (
 from src.threshold.agent.triggers import is_ambiguous_event
 from src.threshold.config import AgentConfig
 from src.threshold.daemon import DaemonConfig, ThresholdDaemon
-from src.threshold.notifier import RecordingNotifier, format_snapshot_caption_prefix
+from src.threshold.notifier import RecordingNotifier, TelegramNotifier, format_snapshot_caption_prefix
 from src.threshold.ring_client import MediaUnavailable, RateLimited, TokenExpired
 from src.threshold.scheduler import FakeClock
 from src.threshold.store import (
@@ -2436,6 +2436,244 @@ class TestAgentLibrary(unittest.TestCase):
                     self.assertIsNotNone(notified_at_val)
                 else:
                     self.assertIsNone(notified_at_val)
+
+
+    def test_real_telegram_notifier_over_limit_contract(self):
+        """
+        Verify real TelegramNotifier interaction with deliver_agent_notification:
+        (a) over-limit alert (>1000 chars): exactly 1 sendPhoto + 1 sendMessage, delivered True, notified_at set, NO duplicate sendMessage.
+        (b) sendMessage returns {"ok": false} or raises: delivered False, notified_at NOT set; fallback retries once (total 2 attempts).
+        (c) <=1000 chars: exactly 1 sendPhoto, 0 sendMessage.
+        (d) _make_request returning None/non-dict on success: delivered True, exactly 1 sendMessage, notified_at set.
+        """
+        from unittest.mock import patch
+
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        snap_file = os.path.join(temp_dir.name, "snap.jpg")
+        with open(snap_file, "wb") as f:
+            f.write(b"\xff\xd8\xff\xe0" + b"\x00" * 30)
+
+        now = datetime(2026, 10, 13, 7, 10, tzinfo=timezone.utc)
+        event = {
+            "device_id": "cam_real_tg",
+            "event_type": "motion_detected",
+            "occurred_at": "2026-10-13T07:10:00Z",
+        }
+
+        def make_inv(event_key: str, long: bool):
+            rec = "C" * 600 if long else "Short recommendation"
+            evidence_list = [
+                Evidence(tool="pull_snapshot", call_id="c1", ok=True, text="Snapshot retrieved."),
+                Evidence(tool="check_routine_status", call_id="c2", ok=True, text="F" * 450 if long else "Normal status"),
+            ]
+            return Investigation(
+                event_key=event_key,
+                mode="replay",
+                provider_name="mock",
+                steps=2,
+                elapsed_ms=50,
+                tier="escalate",
+                recommendation=rec,
+                evidence=evidence_list,
+                fallback=False,
+                trace=[
+                    {
+                        "type": "result",
+                        "tool": "pull_snapshot",
+                        "ok": True,
+                        "data": {"path": snap_file, "captured_at": "2026-10-13T07:10:00Z"},
+                    }
+                ],
+            )
+
+        class MockHTTPResponse:
+            def __init__(self, data: bytes):
+                self._data = data
+            def read(self):
+                return self._data
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+
+        # Case (a): Over-limit (>1000 chars) successful delivery
+        calls_a = []
+        def urlopen_mock_a(req, timeout=None):
+            url = req.get_full_url() if hasattr(req, "get_full_url") else str(req)
+            if "sendPhoto" in url:
+                calls_a.append("sendPhoto")
+                return MockHTTPResponse(b'{"ok": true, "result": {"message_id": 101}}')
+            if "sendMessage" in url:
+                calls_a.append("sendMessage")
+                return MockHTTPResponse(b'{"ok": true, "result": {"message_id": 102}}')
+            raise ValueError(f"Unexpected url {url}")
+
+        conn = init_db(":memory:")
+        inv_a = make_inv("evt_real_tg_a", long=True)
+        save_investigation(conn, "evt_real_tg_a", "cam_real_tg", now, "replay", "mock", "escalate", "escalate", "cleared", inv_a.recommendation)
+        notifier_a = TelegramNotifier(bot_token="test_bot_token_123", chat_id="999888")
+        with patch("urllib.request.urlopen", side_effect=urlopen_mock_a):
+            deliv_a = deliver_agent_notification(notifier_a, event, inv_a, now)
+        self.assertTrue(deliv_a)
+        self.assertEqual(calls_a.count("sendPhoto"), 1)
+        self.assertEqual(calls_a.count("sendMessage"), 1)  # NO duplicate sendMessage
+        if deliv_a:
+            conn.execute("UPDATE investigations SET notified_at = ? WHERE event_key = ?", (to_iso_timestamp(now), inv_a.event_key))
+            conn.commit()
+        cur = conn.execute("SELECT notified_at FROM investigations WHERE event_key = ?", (inv_a.event_key,))
+        self.assertIsNotNone(cur.fetchone()[0])
+        conn.close()
+
+        # Case (b1): sendMessage returns {"ok": false} -> delivered False, fallback retries once (total 2 attempts)
+        calls_b1 = []
+        def urlopen_mock_b1(req, timeout=None):
+            url = req.get_full_url() if hasattr(req, "get_full_url") else str(req)
+            if "sendPhoto" in url:
+                calls_b1.append("sendPhoto")
+                return MockHTTPResponse(b'{"ok": true, "result": {"message_id": 201}}')
+            if "sendMessage" in url:
+                calls_b1.append("sendMessage")
+                return MockHTTPResponse(b'{"ok": false, "description": "Forbidden: bot blocked by user"}')
+            raise ValueError(f"Unexpected url {url}")
+
+        conn = init_db(":memory:")
+        inv_b1 = make_inv("evt_real_tg_b1", long=True)
+        save_investigation(conn, "evt_real_tg_b1", "cam_real_tg", now, "replay", "mock", "escalate", "escalate", "cleared", inv_b1.recommendation)
+        notifier_b1 = TelegramNotifier(bot_token="test_bot_token_123", chat_id="999888")
+        with patch("urllib.request.urlopen", side_effect=urlopen_mock_b1):
+            deliv_b1 = deliver_agent_notification(notifier_b1, event, inv_b1, now)
+        self.assertFalse(deliv_b1)
+        self.assertEqual(calls_b1.count("sendPhoto"), 1)
+        self.assertEqual(calls_b1.count("sendMessage"), 2)  # Initial over-limit attempt + 1 fallback retry
+        if deliv_b1:
+            conn.execute("UPDATE investigations SET notified_at = ? WHERE event_key = ?", (to_iso_timestamp(now), inv_b1.event_key))
+            conn.commit()
+        cur = conn.execute("SELECT notified_at FROM investigations WHERE event_key = ?", (inv_b1.event_key,))
+        self.assertIsNone(cur.fetchone()[0])
+        conn.close()
+
+        # Case (b2): sendMessage raises exception -> delivered False, fallback retries once (total 2 attempts)
+        calls_b2 = []
+        def urlopen_mock_b2(req, timeout=None):
+            url = req.get_full_url() if hasattr(req, "get_full_url") else str(req)
+            if "sendPhoto" in url:
+                calls_b2.append("sendPhoto")
+                return MockHTTPResponse(b'{"ok": true, "result": {"message_id": 301}}')
+            if "sendMessage" in url:
+                calls_b2.append("sendMessage")
+                import urllib.error
+                raise urllib.error.URLError("Network connection reset")
+            raise ValueError(f"Unexpected url {url}")
+
+        conn = init_db(":memory:")
+        inv_b2 = make_inv("evt_real_tg_b2", long=True)
+        save_investigation(conn, "evt_real_tg_b2", "cam_real_tg", now, "replay", "mock", "escalate", "escalate", "cleared", inv_b2.recommendation)
+        notifier_b2 = TelegramNotifier(bot_token="test_bot_token_123", chat_id="999888")
+        with patch("urllib.request.urlopen", side_effect=urlopen_mock_b2):
+            deliv_b2 = deliver_agent_notification(notifier_b2, event, inv_b2, now)
+        self.assertFalse(deliv_b2)
+        self.assertEqual(calls_b2.count("sendPhoto"), 1)
+        self.assertEqual(calls_b2.count("sendMessage"), 2)  # Initial over-limit attempt + 1 fallback retry
+        cur = conn.execute("SELECT notified_at FROM investigations WHERE event_key = ?", (inv_b2.event_key,))
+        self.assertIsNone(cur.fetchone()[0])
+        conn.close()
+
+        # Case (c): <=1000 chars -> exactly 1 sendPhoto, 0 sendMessage
+        calls_c = []
+        def urlopen_mock_c(req, timeout=None):
+            url = req.get_full_url() if hasattr(req, "get_full_url") else str(req)
+            if "sendPhoto" in url:
+                calls_c.append("sendPhoto")
+                return MockHTTPResponse(b'{"ok": true, "result": {"message_id": 401}}')
+            if "sendMessage" in url:
+                calls_c.append("sendMessage")
+                return MockHTTPResponse(b'{"ok": true, "result": {"message_id": 402}}')
+            raise ValueError(f"Unexpected url {url}")
+
+        conn = init_db(":memory:")
+        inv_c = make_inv("evt_real_tg_c", long=False)
+        save_investigation(conn, "evt_real_tg_c", "cam_real_tg", now, "replay", "mock", "escalate", "escalate", "cleared", inv_c.recommendation)
+        notifier_c = TelegramNotifier(bot_token="test_bot_token_123", chat_id="999888")
+        with patch("urllib.request.urlopen", side_effect=urlopen_mock_c):
+            deliv_c = deliver_agent_notification(notifier_c, event, inv_c, now)
+        self.assertTrue(deliv_c)
+        self.assertEqual(calls_c.count("sendPhoto"), 1)
+        self.assertEqual(calls_c.count("sendMessage"), 0)
+        conn.close()
+
+        # Case (d): _make_request returning None on non-raising success must be treated as delivered True (no duplicate retry)
+        class NoneReturningTelegramNotifier(TelegramNotifier):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.make_request_calls = []
+            def send_photo(self, photo_bytes, caption):
+                return {"ok": True, "result": {"message_id": 501}}
+            def _make_request(self, endpoint, payload):
+                self.make_request_calls.append(endpoint)
+                return None  # Non-raising return representing successful dispatch
+
+        conn = init_db(":memory:")
+        inv_d = make_inv("evt_real_tg_d", long=True)
+        save_investigation(conn, "evt_real_tg_d", "cam_real_tg", now, "replay", "mock", "escalate", "escalate", "cleared", inv_d.recommendation)
+        notifier_d = NoneReturningTelegramNotifier(bot_token="test_bot_token_123", chat_id="999888")
+        deliv_d = deliver_agent_notification(notifier_d, event, inv_d, now)
+        self.assertTrue(deliv_d)
+        self.assertEqual(notifier_d.make_request_calls.count("sendMessage"), 1)
+        conn.close()
+
+    def test_build_gate_facts_cooldown_evaluates_latest_across_both_tables(self):
+        """
+        Verify that build_gate_facts queries MAX(notified_at) across BOTH escalations
+        and investigations tables, reflecting household-wide cooldown scope.
+        """
+        conn = init_db(":memory:")
+        now = datetime(2026, 10, 18, 12, 20, 0, tzinfo=timezone.utc)
+
+        # 1. Empty state: no notifications in either table -> None
+        facts_empty = build_gate_facts(conn, "cam_1", now)
+        self.assertIsNone(facts_empty.minutes_since_last_notification)
+
+        save_routine(
+            conn,
+            routine_id="rt_cooldown",
+            property_id="prop_1",
+            name="Morning Cooldown",
+            device_id="cam_1",
+            expected_event_type="motion_detected",
+            window_start="08:00",
+            window_end="09:00",
+            days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            timezone_name="America/Chicago",
+        )
+
+        # 2. Case A: Escalation is more recent (12:00 vs 11:30) -> 20 minutes
+        conn.execute(
+            """
+            INSERT INTO escalations (routine_id, local_date, fired_at, notified_at)
+            VALUES ('rt_cooldown', '2026-10-18', '2026-10-18T11:59:00Z', '2026-10-18T12:00:00Z')
+            """
+        )
+        inv_id1 = save_investigation(
+            conn, "evt_cd_1", "cam_1", "2026-10-18T11:30:00Z", "replay", "mock", "escalate", "escalate", "cleared", "check"
+        )
+        conn.execute("UPDATE investigations SET notified_at = ? WHERE id = ?", ("2026-10-18T11:30:00Z", inv_id1))
+
+        facts_a = build_gate_facts(conn, "cam_1", now)
+        self.assertIsNotNone(facts_a.minutes_since_last_notification)
+        self.assertAlmostEqual(facts_a.minutes_since_last_notification, 20.0, places=1)
+
+        # 3. Case B: Investigation is more recent (12:10 vs 12:00) -> 10 minutes
+        inv_id2 = save_investigation(
+            conn, "evt_cd_2", "cam_1", "2026-10-18T12:10:00Z", "replay", "mock", "escalate", "escalate", "cleared", "check"
+        )
+        conn.execute("UPDATE investigations SET notified_at = ? WHERE id = ?", ("2026-10-18T12:10:00Z", inv_id2))
+
+        facts_b = build_gate_facts(conn, "cam_1", now)
+        self.assertIsNotNone(facts_b.minutes_since_last_notification)
+        self.assertAlmostEqual(facts_b.minutes_since_last_notification, 10.0, places=1)
+
+        conn.close()
 
 
 if __name__ == "__main__":

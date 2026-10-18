@@ -149,7 +149,7 @@ def deliver_agent_notification(
                     if isinstance(res, dict):
                         text_ok = bool(res.get("ok", True))
                     else:
-                        text_ok = bool(res)
+                        text_ok = True
                 elif hasattr(notifier, "send_message") and callable(getattr(notifier, "send_message")):
                     res = notifier.send_message(message_text)
                     if isinstance(res, dict):
@@ -189,7 +189,7 @@ def deliver_agent_notification(
                 if isinstance(res, dict):
                     delivered = bool(res.get("ok", True))
                 else:
-                    delivered = bool(res)
+                    delivered = True
             elif hasattr(notifier, "send_message") and callable(getattr(notifier, "send_message")):
                 res = notifier.send_message(message_text)
                 if isinstance(res, dict):

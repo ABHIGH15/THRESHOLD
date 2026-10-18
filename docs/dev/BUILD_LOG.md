@@ -1503,3 +1503,33 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 3. The events table schema in `src/threshold/store.py` uses `PRIMARY KEY (source, external_id)`.
 4. The 30-minute notification cooldown is household-wide across both `escalations` and `investigations`.
 5. The A10b report cited evidence files and quotes that did not exist on disk; superseded by evidence/A10c and evidence/A10d (git-ignored).
+
+### [2026-10-18T14:45:00Z] Task A10f: Real-Notifier Contract, Wording Repairs, and Live Photo-Path Script
+
+#### 1. Scope & Execution Overview
+- **STEP 1 — Real TelegramNotifier Contract & Non-Dict Return Hardening**:
+  - Documented `TelegramNotifier` API contract: `_make_request("sendMessage", payload)` and `_make_multipart_request("sendPhoto", fields, files)` return parsed response dict (e.g. `{"ok": true, "result": {...}}`) on success, raise `RuntimeError` on network/HTTP failure. Note: `TelegramNotifier` does not define a `send_message` method.
+  - Hardened `src/threshold/agent/runner.py`: fixed `deliver_agent_notification` so that a non-raising, non-dict return from `_make_request` (or `send_message`) is treated as delivered (`text_ok = True`, `delivered = True`).
+  - Added `test_real_telegram_notifier_over_limit_contract` to `tests/test_agent.py`. Captured RED failure (`AssertionError: False is not true` on `deliv_d`) in `evidence/A10f/01_notifier_contract_red.txt` (exit=1), then GREEN pass in `evidence/A10f/02_notifier_contract_green.txt` (exit=0).
+- **STEP 2 — Positive Control & Decision Greps**:
+  - Ran positive control grep: `git diff 6e500eb..HEAD -- src/threshold/agent/runner.py | grep -En "^[-+].*(delivered|text_ok)"` matched 22 lines.
+  - Ran decision invariance grep: `grep -En "^[-+].*(decision|notify_enabled|notified_at|is_ambiguous)"` proved exactly 0 lines changed in `runner.py`. Output saved to `evidence/A10f/06_positive_control_grep.txt`.
+- **STEP 3 — Wording Repairs (README + Integration Notes)**:
+  - Updated Finding 7 in `docs/ring_integration_notes.md`: deleted "low-power standby" and "battery", quoted `FINDINGS.md:35` verbatim: `attributes.online: boolean (false when camera idle, true when live stream/session active)`.
+  - Rewrote Option 3 in Finding 7 to reference `RingClient.get_snapshot` via `media/image/download` without `RING_SANDBOX_IDLE_ONLINE`.
+  - Extended `scripts/dev/check_readme.py` to scan `docs/ring_integration_notes.md` for `ALL_CAPS_WITH_UNDERSCORES` tokens and require them in `.env.example` or `NOTES_ALLOWED_TOKENS`. Proved with negative test on bogus token (`07_notes_env_negative.txt`, exit=1) and real pass (`08_notes_env_real.txt`, exit=0).
+  - Replaced `file:line` citations in Finding 7 with `file::symbol` (e.g. `src/threshold/ring_client.py::poll_once`, `src/threshold/scheduler.py::build_device_health_record`).
+  - Updated README Limitation 8 to accurately name `America/New_York` EDT/EST for DST boundaries (`test_us_fallback_dst_boundary`) and `America/Chicago` for standard routines.
+  - Added `test_build_gate_facts_cooldown_evaluates_latest_across_both_tables` to `tests/test_agent.py` to prove household-wide cooldown across both `escalations` and `investigations` tables; updated README cooldown sentence citing both tests.
+  - Saved diff to `evidence/A10f/09_wording_repairs_diff.txt`.
+- **STEP 4 — Live Photo Path Script & Tests (`scripts/live_photo_check.py`)**:
+  - Implemented `scripts/live_photo_check.py` supporting `--dry-run` (default offline validation with placeholder JPEG, char counts, and strict Telegram HTML tag allowlist and balance checks) and `--send` (real Ring snapshot retrieval, local disk archiving under `snapshots/`, synthetic Investigation generation, and Telegram photo delivery).
+  - On 416 missing media error, prints: `simulate live view in the Playground, wait ~2 minutes, retry.`
+  - Created `tests/test_live_photo_check.py` covering dry-run metrics, HTML validator, mocked send, 416 retry guidance, and secret hygiene (6 tests passing).
+  - Documented optional command in README section 7; verified `check_readme.py` passes.
+  - Captured dry-run output in `evidence/A10f/10_live_photo_check_dry_run.txt` (exit=0).
+
+#### 2. Verification Summary
+- **Evidence Files:** Saved under `evidence/A10f/` (`01_notifier_contract_red.txt` through `10_live_photo_check_dry_run.txt`).
+- **Test Suite:** **287 tests passing** (279 baseline + 2 new tests in `test_agent.py` + 6 new tests in `test_live_photo_check.py`).
+- **All Citations & Redaction:** 21 symbols, 22 test citations verified (exit 0); 94 files scanned for secrets (0 hits).
