@@ -1461,3 +1461,39 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 - **Test Suite:** **276 tests passing** (275 baseline + 1 new test covering 4 delivery combos).
 - **Clean Clone Validation:** 100% passing under `env -i`.
 - **Frozen Diff Integrity:** `gate.py`, `status.py`, `triage.py`, `models.py`, `scheduler.py`, `ingest.py`, and `notifier.py` remain strictly untouched (zero diff vs `a3b749b`).
+### [2026-10-18T05:00:00Z] Task A10c: Verification Repairs, Honest Redaction Scanner, Claims Rebuilt, Isolated Judge Dry Run
+
+#### 1. Scope & Execution Overview
+- **Step 0 — Raw Facts & Ground-Truth Verification**:
+  - Validated git history: `git log --oneline -8` (`01_git_log.txt`) and `git show --stat` for commits `379d094`, `a16c728`, `3163b9e`, `7e3c407` (`02_git_show_stats.txt`).
+  - Recorded exact diff between `6e500eb` and HEAD on `src/` and `tests/` (`04_diff_src_tests.txt`). Confirmed `src/threshold/demo.py` is the only `src/` file changed besides `runner.py` (replaced line number citations with function names `Scheduler.tick` and `notifier.format_escalation_text`).
+  - Demo regression check: verified `env -i PATH="$PATH" python3 -m src.threshold demo` (`05_demo_clean.txt`). Confirmed 0 machine path leaks (`06_demo_grep_paths.txt` count: 0), 6 scenes present (`07_demo_grep_scenes.txt` matching A10 `09_a10_demo_grep_scenes.txt`), 0 occurrences of `cam_front` / `evidence_3am` (`08_demo_grep_devices.txt`). Explained that the conflicting A10b report excerpt was hallucinated in the text and did not come from any file on disk.
+  - Frozen paths integrity: tested base commit `a3b749b` with `git cat-file -e` across all 11 core files (`11_frozen_path_existence.txt`). Noted `src/threshold/gate.py` was missing at base because the real path is `src/threshold/agent/gate.py` (which returned OK). Confirmed `git diff a3b749b..HEAD -- <frozen paths>` is exactly 0 lines (`12_frozen_paths_real_diff.txt`). Annotated the 10 files changed since `a3b749b`.
+- **Step 1 — Honest Redaction Scanner**:
+  - Updated `scripts/dev/check_redaction.py` to scan all 96 tracked text files reported by `git ls-files` (`13_redaction_full_scan.txt`: 93 scanned, 3 skipped with explicit reasons: self-exclusion for pattern definitions and 0-byte `.gitkeep`).
+  - Implemented honest `--self-test` (`14_redaction_self_test.txt`): (i) injected real collected device ID from memory into synthetic buffer and detected it (count 1); (ii) separately injected JWT, Bearer, AWS signature, and Telegram token canaries and proved detection (counts: 1, 1, 1, 1). Exited with code 1.
+  - Implemented `--history` scan (`15_redaction_history_scan.txt`): analyzed all 38 commits in `git log -p --all`. Confirmed 0 commits contain real Ring device IDs and 0 commits contain secret patterns.
+- **Step 2 — Rebuilt Claims Table**:
+  - Extracted all 54 citation lines from `README.md` and `docs/ring_integration_notes.md` into `20_extracted_claims.txt`.
+  - Extracted exact test assertion lines for all 15 cited tests into `21_test_assertions.txt`.
+  - Corrected claims: deleted bogus "303 to MP4" association with `c2_case_a2` (sample is snapshot image download); verified all unit-tested rows are labeled `UNIT-TESTED (local fixtures)` and live samples labeled `VERIFIED LIVE (docs/ring_samples/...)`.
+  - Documented all 5 status constants in `src/threshold/status.py` (`STATUS_WATCHING`, `STATUS_OBSERVED`, `STATUS_MISSED`, `STATUS_UNKNOWN`, `STATUS_SNOOZED`) and mapped them to their unit tests in `tests/test_triage.py`.
+  - Cited `src/threshold/status.py::derive_status` for DST boundary logic tested in `test_us_fallback_dst_boundary`.
+  - Pinned gate cooldown scope: pasted full 68 lines of `src/threshold/agent/gate.py` (`16_gate_full.txt`) and `notified_at` queries in `src/threshold/agent/facts.py` (`17_facts_queries.txt`), confirming no `device_id` filter (household-wide notification cooldown). Proved string `"suppress"` does not exist in `gate.py` (`19_gate_suppress_search.txt`).
+  - Pinned idempotency schema: grepped `PRIMARY KEY (source, external_id)` in `store.py` and request ID mapping in `server.py` (`18_idempotency_raw.txt`).
+- **Step 3 — Exact Wording Fixes**:
+  - Updated platform line in `README.md` lines 44 and 290 to exact wording: `Tested on macOS with Python 3.14.7. Linux and Windows: not tested. Windows additionally needs pip install tzdata.`
+  - Cited primary-source evidence line for `Content-Encryption: "none"` (`docs/ring_samples/c2_case_a2_latest_in_range_recording.json:20`).
+  - Grepped ports across `src/threshold/*.py` (`22_port_greps.txt`): confirmed default port is 8080 (never 8000).
+- **Step 4 — Final Mechanical Audits**:
+  - Implemented negative test for `check_readme.py` (`26_readme_negative_test.txt`): verified detection and exit 1 on 4 injected defects (broken link, untracked link, fake subcommand, missing env var). Verified exit 0 on real `README.md` (`27_readme_real_test.txt`).
+  - Confirmed `silent_fallback` test was renamed to `test_caption_limit_strict_photo_length_succeeds_via_dual_delivery` in commit `a16c728` (`24_silent_fallback_grep.txt`). Extracted full over-limit test body covering all 4 combos (`25_over_limit_test_body.txt`).
+  - Updated `judge_dry_run.py` to explicitly print child process clean environment variables (`32_judge_dry_run_clean_env.txt`: 2 keys `PATH` and `HOME`, 276 tests passing, exit 0).
+  - Verified `git show --stat 7e3c407` (`28_build_log_commit_stat.txt`: 50 added, 0 deleted).
+  - Documented hunks in `3163b9e` (`29_public_tree_tests_hunks.txt`) removing internal `EXECUTION_PLAN.md` references from `tests/fixtures.py` and `tests/test_triage.py`.
+
+#### 2. Verification Summary
+- **Evidence Files:** Saved under `evidence/A10c/` (`01_git_log.txt` through `32_judge_dry_run_clean_env.txt`).
+- **Test Suite:** **276 tests passing** in clean clone under `env -i`.
+- **Clean Clone Validation:** 100% passing across `check_readme.py`, `check_citations.py`, `check_redaction.py`, `demo`, and unit test suite.
+- **Frozen Diff Integrity:** `agent/gate.py`, `agent/triggers.py`, `agent/facts.py`, `agent/tools.py`, `status.py`, `scheduler.py`, `ingest.py`, `notifier.py`, `store.py`, `models.py`, and `triage.py` remain strictly untouched (zero diff vs `a3b749b`).

@@ -66,6 +66,11 @@ def main() -> int:
         "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"),
         "HOME": temp_dir,
     }
+    print(f"3. Child process execution environment (isolated env -i simulation):")
+    print(f"   - Environment keys count: {len(clean_env)} (keys: {list(clean_env.keys())})")
+    print(f"   - PATH: {clean_env['PATH']}")
+    print(f"   - HOME: {clean_env['HOME']}")
+    print(f"   - Environment isolated: True (zero inherited application/token env vars)")
 
     results = []
 

@@ -41,7 +41,7 @@ The demo runs completely offline with zero configuration, zero credentials, and 
 ```bash
 python3 -m src.threshold demo
 ```
-*Tested on macOS, Python 3.14.7. Linux: not yet tested. Windows: untested; needs `pip install tzdata`.*
+*Tested on macOS with Python 3.14.7. Linux and Windows: not tested. Windows additionally needs `pip install tzdata`.*
 
 ### Real Demo Terminal Output (First 25 Lines)
 ```text
@@ -108,7 +108,7 @@ Threshold explicitly separates production logic from simulated test scenarios:
 | Signature verification | REAL | HMAC-SHA256 verified before JSON parse (401 on bad signature) in `src/threshold/server.py::WebhookHandler.do_POST` | Verified locally with signed POSTs (`tests.test_webhook_auth.TestSignatureVerification.test_valid_signature_passes`) |
 | Idempotency | REAL | SQLite schema constraint `PRIMARY KEY (source, external_id)` in `src/threshold/store.py`; external ID mapped via `external_id = meta.get("request_id") or data.get("id") or "missing_id"` in `src/threshold/server.py::WebhookHandler.do_POST` | Verified locally with duplicate requests (`tests.test_server.TestWebhookServer.test_replay_attack_duplicate_delivery_one_row`) |
 | Webhook ingestion | REAL | `ingest_event` parses schema and normalizes types (`src/threshold/ingest.py::ingest_event`) | Verified against Ring v1.1 documentation with signed test requests (`tests.test_ingest.TestIngestPipeline.test_matching_event_advances_last_satisfied_at`) |
-| Status derivation | REAL | `derive_status` evaluates window + grace period (`src/threshold/status.py::derive_status`) | Deterministic offline logic (`tests.test_triage.TestDerivedStatus.test_watching_within_window`) |
+| Status derivation | REAL | `derive_status` evaluates window + grace period (`src/threshold/status.py::derive_status`) | Deterministic offline logic across statuses: `watching`, `observed`, `missed`, `unknown`, `snoozed` (`tests.test_triage.TestDerivedStatus.test_watching_within_window`) |
 | Scheduler loop | REAL | `Scheduler.tick` checks deadlines and transitions (`src/threshold/scheduler.py::Scheduler.tick`) | Deterministic offline logic (`tests.test_scheduler.TestSchedulerAbsenceEngine.test_five_consecutive_ticks_past_miss_exactly_one_escalation_row`) |
 | Fire-once escalation | REAL | One escalation per missed routine per day (`src/threshold/scheduler.py::Scheduler.tick`); reminders while unacknowledged | Deterministic offline logic (`tests.test_scheduler.TestSchedulerAbsenceEngine.test_five_consecutive_ticks_past_miss_exactly_one_escalation_row`) |
 | Alert formatting | REAL | Rendered through `format_escalation_text` (`src/threshold/notifier.py::format_escalation_text`) matching Telegram production alerts | Verified across unit tests (`tests.test_notifier.TestNotifierSystem.test_console_notifier_message_content_and_phone_call_disclaimer`) |
@@ -286,8 +286,8 @@ In the interest of complete engineering honesty:
 5. **Replay Agent:** The shipped agent replays scripted step traces and does not perform dynamic natural-language reasoning over event context.
 6. **Single Household / Single Chat:** Current implementation supports a single household database and a single caregiver Telegram chat destination.
 7. **Unauthenticated Loopback Dashboard:** The web status dashboard is designed for local observation (`127.0.0.1`) and does not provide session authentication.
-8. **Timezone & DST Scope:** Unit tests verify standard transitions (e.g. America/Chicago CDT/CST and midnight-crossing windows; `tests.test_scheduler.TestSchedulerAbsenceEngine.test_us_fallback_dst_boundary`); arbitrary international boundary changes are untested.
-9. **Platform Testing:** Tested on macOS, Python 3.14.7 (`tests.test_platform.TestPlatformPreflight.test_demo_pipeline_zoneinfo_not_found_handling`). Linux: not yet tested. Windows: untested; needs `pip install tzdata` for Python `zoneinfo` support.
+8. **Timezone & DST Scope:** Unit tests verify standard transitions (e.g. America/Chicago CDT/CST and midnight-crossing windows in `src/threshold/status.py::derive_status`; tested in `tests.test_scheduler.TestSchedulerAbsenceEngine.test_us_fallback_dst_boundary`); arbitrary international boundary changes are untested.
+9. **Platform Testing:** Tested on macOS with Python 3.14.7 (`tests.test_platform.TestPlatformPreflight.test_demo_pipeline_zoneinfo_not_found_handling`). Linux and Windows: not tested. Windows additionally needs `pip install tzdata` for Python `zoneinfo` support.
 10. **Simulated Household Data:** The Dallas household, devices, and motion timestamps in the demo are fictional scenarios for presentation purposes.
 
 ---
