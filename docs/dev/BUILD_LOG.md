@@ -1411,3 +1411,53 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 - **Test Suite:** **275 tests passing** (270 baseline + 5 new platform preflight tests in `tests/test_platform.py`).
 - **Clean Clone Validation:** Quickstart demo and full unit tests verified in fresh clone under `env -i`.
 - **Frozen Diff Integrity:** `gate.py`, `status.py`, `triage.py`, `models.py`, `scheduler.py`, `ingest.py`, and `notifier.py` remain strictly untouched (zero diff vs `a3b749b`).
+### [2026-10-18T04:15:00Z] Task A10b: Audit Claims, Redaction & Citations Checkers, Delivery Hardening, Public Tree Reorganization
+
+#### 1. Scope & Execution Overview
+- **Step 1 — State & Commit Validation**:
+  - Commits validated: `A10b-1: BUILD_LOG entry` (`379d094`), `A10b: fixes` (`a16c728`), `A10b: public tree` (`3163b9e`).
+  - All commands captured shell-agnostically with `cmd > evidence/A10b/<NN>_<name>.txt 2>&1; echo "exit=$?" | tee -a evidence/A10b/<NN>_<name>.txt`.
+- **Step 2 — Public Sample Redaction & Citations**:
+  - Created `docs/ring_samples/` with 5 sanitized/redacted primary evidence files (`FINDINGS.md`, `c2_case_a2_latest_in_range_recording.json`, `c2_case_a_latest_in_range.json`, `c2_case_b_at_timestamp_now.json`, `c2_case_c_at_timestamp_past.json`).
+  - Redacted live device IDs, account IDs, tokens, URLs, and serial numbers (`REDACTED_DEVICE_1`, `REDACTED_ACCOUNT_ID`).
+  - Updated all citations in `README.md` and `docs/ring_integration_notes.md` to reference only committed sample files under `docs/ring_samples/`.
+- **Step 3 — Checkers Implementation & Self-Tests**:
+  - Created `scripts/dev/check_redaction.py`: scans git-tracked files for tokens, account IDs, live device IDs, and high-entropy patterns. `--self-test` verifies failure on canary defect (`evidence/A10b/07_redaction_self_test.txt`, exit=1). Full scan passes (`evidence/A10b/08_redaction_scan.txt`, exit=0). When run in clean clone without `evidence/ring/`, cleanly outputs `SKIPPED: evidence/ring/ not present`.
+  - Created `scripts/dev/check_citations.py`: parses AST to verify 18 code symbols exist and runs `unittest` on 15 test IDs. `--self-test` verifies failure on canary defect (`evidence/A10b/09_citations_self_test.txt`, exit=1). Full check passes (`evidence/A10b/10_citations_check.txt` & `20_citations_after_tree.txt`, exit=0).
+  - Updated `scripts/dev/check_readme.py`: verified against `git ls-files` rather than local disk. Verified failure on broken copy (`evidence/A10b/16_check_readme_broken.txt`, exit=1). Full check passes (`evidence/A10b/17_check_readme_real.txt` & `19_readme_after_tree.txt`, exit=0).
+- **Step 4 — Claims Audit**:
+  - Replaced all line numbers in `README.md` and `docs/ring_integration_notes.md` with AST symbol citations (`file::symbol`) and full unittest identifiers (`tests.test_X.TestY.test_z`).
+  - Replaced line numbers in `src/threshold/demo.py` closing audit table with function names.
+  - Audited claims with primary-source quotes:
+    - 30-minute cooldown: clarified in `README.md` as a global/household-wide notification cooldown (`facts.py::build_gate_facts` evaluates `MAX(notified_at)` across all rows with no device filter), contrasting with per-device investigation deduplication (`triggers.py::is_ambiguous_event`).
+    - Webhook idempotency: cited `store.py` schema constraint `PRIMARY KEY (source, external_id)` and `server.py` request ID fallback logic.
+  - Corrected wording overreaches:
+    - Replaced "taker-key encryption" with "local public-key decryption (E2EE)".
+    - Replaced "Absent from Ring Playground accounts" with "Absent from Ring sandbox account (1 doorbot device)".
+    - Qualified webhook ingest in top-30 summary with "(locally signed POSTs only in sandbox demo)".
+    - Clarified platform preflight as "macOS tested (Linux and Windows require tzdata / standard platform support)".
+- **Step 5 — Delivery Hardening (`src/threshold/agent/runner.py`)**:
+  - In `deliver_agent_notification`, wrapped the over-limit (>1000 char) `sendMessage` fallback in `try...except Exception as err:`.
+  - Verified `text_ok = bool(res.get("ok", True))` and set `delivered = text_ok`.
+  - If text delivery fails or raises, logged error and left `delivered = False`.
+  - Ensured `notified_at` on the investigation is only stamped when `delivered` is True, and no exception escapes.
+  - Added unit test `tests.test_agent.TestAgentLibrary.test_over_limit_delivery_combos_and_notified_at` covering all 4 photo/text success/failure combinations.
+- **Step 6 — Clean Clone Verification**:
+  - Cloned repository under isolated `env -i PATH="$PATH"`.
+  - All mechanical checkers (`check_readme.py`, `check_citations.py`, `check_redaction.py`) passed (exit 0).
+  - Quick-start demo passed (exit 0).
+  - Full unit test suite (276 tests) passed (exit 0).
+- **Step 7 — Public Tree Reorganization**:
+  - Removed private planning documents: `git rm EXECUTION_PLAN.md NO_AWS_RUNBOOK.md`.
+  - Relocated specification and log: `git mv threshold_spec.md docs/dev/threshold_spec.md` and `git mv BUILD_LOG.md docs/dev/BUILD_LOG.md`.
+  - Retained `scripts/dev/` in place.
+  - Removed internal planning doc references from `tests/fixtures.py` and `tests/test_triage.py`.
+  - Updated citation in `docs/ring_integration_notes.md` to point to `docs/dev/BUILD_LOG.md`.
+  - Confirmed zero occurrences of `EXECUTION_PLAN` and `NO_AWS_RUNBOOK` across repository outside `docs/dev/BUILD_LOG.md`.
+  - Verified frozen-path diff vs `a3b749b` is exactly 0 lines (`evidence/A10b/21_frozen_path_diff.txt`).
+
+#### 2. Verification Summary
+- **Evidence Files:** Saved under `evidence/A10b/` (`01_git_status_head.txt` through `21_frozen_path_diff.txt`).
+- **Test Suite:** **276 tests passing** (275 baseline + 1 new test covering 4 delivery combos).
+- **Clean Clone Validation:** 100% passing under `env -i`.
+- **Frozen Diff Integrity:** `gate.py`, `status.py`, `triage.py`, `models.py`, `scheduler.py`, `ingest.py`, and `notifier.py` remain strictly untouched (zero diff vs `a3b749b`).
