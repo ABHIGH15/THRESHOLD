@@ -390,6 +390,38 @@ class TestWebhookServer(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertNotEqual(rows[0][1], rows[1][1])
 
+    def test_missing_id_identical_payloads_replay_dedupes_one_row(self):
+        """
+        Two identical webhook payloads without request_id or data.id produce the same
+        body_hash fallback and must deduplicate on PRIMARY KEY (source, external_id)
+        yielding exactly 1 stored row.
+        """
+        payload = json.dumps({
+            "data": {
+                "type": "motion_detected",
+                "attributes": {
+                    "source": "cam_front",
+                    "timestamp": 1791814643000,
+                }
+            }
+        }).encode("utf-8")
+
+        sig = compute_signature(payload, self.secret)
+        st1, _ = self._send_request("POST", "/webhooks/ring", payload, {"X-Signature": sig})
+        self.assertEqual(st1, 200)
+
+        # Replay the identical payload
+        st2, _ = self._send_request("POST", "/webhooks/ring", payload, {"X-Signature": sig})
+        self.assertEqual(st2, 200)
+
+        conn = get_connection(self.db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT source, external_id, device_id FROM events WHERE source = 'webhook'")
+        rows = cur.fetchall()
+        conn.close()
+
+        self.assertEqual(len(rows), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

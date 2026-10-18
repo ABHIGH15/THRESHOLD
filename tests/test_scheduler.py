@@ -10,6 +10,8 @@ import time
 import unittest
 from zoneinfo import ZoneInfo
 
+from src.threshold.agent.facts import build_gate_facts
+from src.threshold.agent.gate import decide
 from src.threshold.models import Routine
 from src.threshold.scheduler import (
     AcceleratedClock,
@@ -204,7 +206,66 @@ class TestSchedulerAbsenceEngine(unittest.TestCase):
         self.assertEqual(cur.fetchone()[0], 0)
         conn.close()
 
-    # 4b. Routine whose device has NO device_health row -> unknown and 0 escalations
+    # 4b. Device with online=False and FRESH fetched_at/reported_at
+    def test_offline_fresh_device_returns_unknown_zero_escalations_and_gate_checks_needed(self):
+        """
+        Prove that a device with online=False and fresh fetched_at/reported_at produces:
+        1. derive_status returns STATUS_UNKNOWN past escalation deadline.
+        2. Scheduler.tick produces exactly 0 escalations.
+        3. Agent gate decide() returns check_needed with reason_code 'device_not_fresh'.
+        """
+        conn = get_connection(self.db_path)
+        save_routine(
+            conn,
+            routine_id="rt_idle_sandbox",
+            property_id="prop_1",
+            name="Morning Medicine",
+            device_id="cam_idle",
+            expected_event_type="motion_detected",
+            window_start="08:00",
+            window_end="09:00",
+            days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            timezone_name="UTC",
+            escalation_delay_minutes=15,
+        )
+        now = datetime(2026, 10, 12, 9, 30, 0, tzinfo=timezone.utc)
+        # Fresh timestamp: fetched 5 minutes ago, but online=False (idle sandbox behavior)
+        fresh_time = "2026-10-12T09:25:00Z"
+        upsert_device_health(
+            conn,
+            "cam_idle",
+            online=False,
+            fetched_at=fresh_time,
+            reported_at=fresh_time,
+            source="poll",
+        )
+        conn.close()
+
+        # 1. Scheduler.tick evaluation
+        clock = FakeClock(now)
+        scheduler = Scheduler(db_path=self.db_path, clock=clock)
+        res = scheduler.tick()
+
+        self.assertEqual(res["statuses"]["rt_idle_sandbox"], STATUS_UNKNOWN)
+        self.assertEqual(res["new_escalations"], 0)
+
+        conn = get_connection(self.db_path)
+        cur = conn.execute("SELECT COUNT(*) FROM escalations")
+        self.assertEqual(cur.fetchone()[0], 0)
+
+        # 2. Agent gate evaluation
+        facts = build_gate_facts(conn, "cam_idle", now)
+        self.assertFalse(facts.device_online_fresh)
+        gate_decision = decide(
+            tier="escalate",
+            ok_tool_results=3,
+            facts=facts,
+        )
+        self.assertEqual(gate_decision.decision, "check_needed")
+        self.assertEqual(gate_decision.reason_code, "device_not_fresh")
+        conn.close()
+
+    # 4c. Routine whose device has NO device_health row -> unknown and 0 escalations
     def test_device_with_no_health_row_returns_unknown_and_zero_escalations(self):
         conn = get_connection(self.db_path)
         save_routine(

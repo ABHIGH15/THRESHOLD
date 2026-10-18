@@ -75,6 +75,7 @@ Every observation is cited directly from verified response artifacts under `docs
   5. `scheduler.py:275-285`: Routine evaluation only escalates `STATUS_MISSED`. Because the status is `STATUS_UNKNOWN`, exactly **0 absence escalations** are triggered.
   6. `agent/facts.py:30-34`: Derives `device_online_fresh = False` because `is_online` is `False`.
   7. `agent/gate.py:41-42`: Rule 3 enforces `if not facts.device_online_fresh: return GateDecision(decision="check_needed", reason_code="device_not_fresh")`. Any agent-proposed escalation is downgraded to `check_needed`.
+- **Verification Test:** `tests.test_scheduler.TestSchedulerAbsenceEngine.test_offline_fresh_device_returns_unknown_zero_escalations_and_gate_checks_needed` proves that an idle device with `online=False` and fresh timestamps results in `STATUS_UNKNOWN`, 0 absence escalations, and gate `check_needed` (`device_not_fresh`).
 - **Architectural Options for Handling Idle/Standby Online State:**
   1. *Option 1 (Current Safe Baseline):* Treat `attributes.online: false` strictly as unconfirmed health. System fails safe by marking the routine `STATUS_UNKNOWN` and blocking automated absence escalations while keeping events visible on the dashboard.
   2. *Option 2 (Timestamp & Event Correlation):* Differentiate deep disconnection from battery standby by examining `reported_at` or recent event history timestamps (`docs/ring_samples/event_history.json`). If `reported_at` is within the staleness window (e.g. < 2 hours), treat device as reachable for event reception.
