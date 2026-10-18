@@ -1573,3 +1573,26 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 - **Test Suite:** **291 tests passing** (288 baseline + 3 new tests in `test_live_photo_check.py`).
 - **Redaction Scan:** 96 tracked files scanned with 0 leaks (`scripts/dev/check_redaction.py`).
 - **All Mechanical Checks:** `scripts/dev/check_readme.py` passes.
+
+### [2026-10-18T15:45:00Z] Task A10h: Neutral Filler for --long
+
+#### 1. Scope & Execution Overview
+- **STEP 1 — Neutral Filler Replacement & Grep Verification**:
+  - Replaced fabricated sensor and history descriptions in `scripts/live_photo_check.py` (`extra_descs` when `long=True`) with neutral, explicitly labeled synthetic filler:
+    `"[SYNTHETIC FILLER X/4] Padding line used only to exercise the over-limit dual-delivery branch when caption length exceeds 1000 characters. Not real sensor evidence or household activity."`
+  - The real snapshot evidence line from Ring remains intact.
+  - Executed whole-repo greps across src, scripts, tests, docs and README.md for the four removed filler phrases (deliberately not repeated here). Zero matches (captured in evidence/A10h/01_zero_match_greps.txt).
+- **STEP 2 — Dry-Run & Unit Test Updates**:
+  - Ran `python3 scripts/live_photo_check.py --dry-run --long`: verified it produces 1153 chars (>1000 threshold) and prints verbatim `Delivery Branch:    Over-limit (photo + separate message)`. Output captured in `evidence/A10h/02_dry_run_long.txt` (exit=0).
+  - Updated `tests/test_live_photo_check.py`: adjusted expected character count to 1153 and added assertion for `[SYNTHETIC FILLER 1/4]`. Ran `python3 -m unittest tests/test_live_photo_check.py` (10/10 tests pass, exit 0, captured in `evidence/A10h/03_test_live_photo_check.txt`).
+- **STEP 3 — Documentation**:
+  - Added line under Section 5 (Live Photo Check) in `README.md`:
+    `"--long pads the message with synthetic filler to exercise the over-limit branch; it contains no real evidence."`
+  - Re-ran `python3 scripts/dev/check_readme.py` (all mechanical checks passed, captured in `evidence/A10h/04_check_readme.txt`).
+
+#### 2. Verification Summary
+- **Evidence Files:** Saved under `evidence/A10h/` (`01_zero_match_greps.txt` through `06_ci_clean_clone.txt`).
+- **Test Suite:** **291 tests passing**.
+- **Redaction Scan:** 96 tracked files scanned with 0 leaks (`scripts/dev/check_redaction.py`).
+- **All Mechanical Checks:** `scripts/dev/check_readme.py` passes.
+

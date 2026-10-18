@@ -90,7 +90,8 @@ class TestLivePhotoCheck(unittest.TestCase):
         output = buf.getvalue()
         self.assertEqual(ret, 0)
         self.assertIn("Delivery Branch:    Over-limit (photo + separate message)", output)
-        self.assertIn("Full Caption:       1041 chars (limit: 1024)", output)
+        self.assertIn("Full Caption:       1153 chars (limit: 1024)", output)
+        self.assertIn("[SYNTHETIC FILLER 1/4]", output)
         self.assertIn("Result: DRY RUN PASSED (exit code 0)", output)
 
     def test_main_cli_default_dry_run(self):

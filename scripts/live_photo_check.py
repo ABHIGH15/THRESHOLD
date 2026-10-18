@@ -161,10 +161,10 @@ def build_synthetic_investigation_and_event(
 
     if long:
         extra_descs = [
-            "Corroborating sensor analysis: Secondary motion in living room and hallway confirmed unexpected activity outside normal sleep hours between 02:00 and 02:15 CDT.",
-            "Household history correlation: No prior false alarms or night wanderings recorded for this household in SQLite corrections within the preceding 30 days.",
-            "Door contact sensor telemetry: Exterior front entry perimeter was accessed at 02:12 CDT without corresponding return motion detected on interior cameras.",
-            "Environmental baseline check: Motion timestamps across multiple zones indicate sequential movement towards front exterior threshold rather than routine bathroom visit.",
+            "[SYNTHETIC FILLER 1/4] Padding line used only to exercise the over-limit dual-delivery branch when caption length exceeds 1000 characters. Not real sensor evidence or household activity.",
+            "[SYNTHETIC FILLER 2/4] Padding line used only to exercise the over-limit dual-delivery branch when caption length exceeds 1000 characters. Not real sensor evidence or household activity.",
+            "[SYNTHETIC FILLER 3/4] Padding line used only to exercise the over-limit dual-delivery branch when caption length exceeds 1000 characters. Not real sensor evidence or household activity.",
+            "[SYNTHETIC FILLER 4/4] Padding line used only to exercise the over-limit dual-delivery branch when caption length exceeds 1000 characters. Not real sensor evidence or household activity.",
         ]
         for idx, desc in enumerate(extra_descs, start=1):
             evidence.append(

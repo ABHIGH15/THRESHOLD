@@ -272,6 +272,8 @@ python3 scripts/live_photo_check.py --dry-run
 python3 scripts/live_photo_check.py --send
 ```
 
+`--long` pads the message with synthetic filler to exercise the over-limit branch; it contains no real evidence.
+
 ---
 
 ## 8. Test Suite
