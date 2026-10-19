@@ -19,6 +19,7 @@ from src.threshold.scheduler import (
     RealClock,
     RecordingNotifier,
     Scheduler,
+    build_device_health_record,
     run_scheduler_tick,
 )
 from src.threshold.status import (
@@ -570,6 +571,40 @@ class TestSchedulerAbsenceEngine(unittest.TestCase):
         time.sleep(0.05)
         t1 = accel_c.now()
         self.assertGreater(t1, t0)
+
+    # 11. Known Limitation characterization: stale reported_at ignored if fetched_at is fresh
+    def test_limitation_build_device_health_record_ignores_stale_reported_at_when_fetched_at_fresh(self):
+        """
+        Document known limitation (Finding 8 & Known Limitation 12):
+        build_device_health_record checks only online=True and fetched_at freshness.
+        An old reported_at timestamp (e.g. 24h old from a cached sandbox state) does not
+        cause the health record to be marked stale if fetched_at is fresh.
+        """
+        conn = get_connection(self.db_path)
+        now = datetime(2026, 10, 19, 12, 0, 0, tzinfo=timezone.utc)
+        old_reported_at = "2026-10-18T12:00:00Z"   # 24 hours old
+        fresh_fetched_at = "2026-10-19T11:55:00Z"  # 5 minutes old (well within 120m threshold)
+
+        upsert_device_health(
+            conn=conn,
+            device_id="cam_stale_reported",
+            online=True,
+            reported_at=old_reported_at,
+            fetched_at=fresh_fetched_at,
+            source="poll",
+        )
+
+        record = build_device_health_record(
+            conn=conn,
+            device_id="cam_stale_reported",
+            now=now,
+            staleness_threshold_minutes=120,
+        )
+        conn.close()
+
+        # CURRENT BEHAVIOR: Despite reported_at being 24 hours old, record evaluates as NOT stale
+        self.assertFalse(record.is_stale(now))
+        self.assertIsNotNone(record.last_event_at)
 
 
 if __name__ == "__main__":

@@ -82,6 +82,14 @@ Every observation is cited directly from verified response artifacts under `docs
   3. *Option 3 (Active Health Probe):* Provide an active probe fallback (`RingClient.get_snapshot` via `media/image/download`) to verify camera responsiveness during evaluation.
 - **Product Suggestion:** Document the semantics of `attributes.online` during idle periods, and provide a distinct status enum (e.g., distinguishing idle reachability from offline disconnection).
 
+### Finding 8: Stale reported_at Retention in Sandbox and Freshness Bound Behavior
+- **Observations:**
+  1. Two live diagnostic polls roughly 3 minutes apart (10 and 13 minutes after an `on_demand` event at `2026-10-19T09:25:52Z`) reported the identical timestamp `reported_at: "2026-10-19T09:25:51Z"` and `online: true`.
+  2. A subsequent snapshot request succeeded with HTTP 200 (61,970 bytes).
+- **HYPOTHESIS:** The sandbox environment returns the last active session's cached status rather than a live heartbeat.
+- **Pipeline Consequence:** In `src/threshold/scheduler.py::build_device_health_record`, device freshness is determined strictly by checking `if not online or (now - fetched_dt) > timedelta(minutes=staleness_threshold_minutes):`. Consequently, Threshold treats `online: true` combined with a recent poll timestamp (`fetched_at`) as fresh regardless of how old the device's `reported_at` timestamp is.
+- **Status:** Not changed: `src/threshold/scheduler.py` is frozen; option for later: also bound staleness by `reported_at`.
+
 ---
 
 ## 3. Redacted Sample Response Artifacts

@@ -302,6 +302,7 @@ In the interest of complete engineering honesty:
 9. **Platform Testing:** Tested on macOS with Python 3.14.7 (`tests.test_platform.TestPlatformPreflight.test_demo_pipeline_zoneinfo_not_found_handling`). Linux and Windows: not tested. Windows additionally needs `pip install tzdata` for Python `zoneinfo` support.
 10. **Simulated Household Data:** The Dallas household, devices, and motion timestamps in the demo are fictional scenarios for presentation purposes.
 11. **Offline/Stale Device Absence Suppression:** A stale or offline (`STATUS_UNKNOWN`) device produces a dashboard state but NO push notification; Threshold refuses to claim absence from unverified data (`tests.test_scheduler.TestSchedulerAbsenceEngine.test_offline_fresh_device_returns_unknown_zero_escalations_and_gate_checks_needed`).
+12. **Freshness Bound Uses Poll Time Over Reported Timestamp:** Threshold determines device freshness from the poll time (`fetched_at`), treating an `online: true` device as fresh even if its Ring `reported_at` timestamp is stale. For background and analysis of this behavior in the sandbox, see Finding 8 in [docs/ring_integration_notes.md](docs/ring_integration_notes.md).
 
 ---
 

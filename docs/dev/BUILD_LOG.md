@@ -1596,3 +1596,23 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 - **Redaction Scan:** 96 tracked files scanned with 0 leaks (`scripts/dev/check_redaction.py`).
 - **All Mechanical Checks:** `scripts/dev/check_readme.py` passes.
 
+### [2026-10-19T10:00:00Z] Task A10j: Document Stale reported_at Finding
+
+#### 1. Scope & Execution Overview
+- **STEP 1 — Primary Source Facts**:
+  - Audited live diagnostic evidence from `evidence/A10i/02_ring_check_before.txt` and `evidence/A10i/04_ring_check_immediate.txt` captured ~3 minutes apart (10m and 13m after live view session).
+  - Both runs reported identical `Reported At: 2026-10-19T09:25:51Z` and `Status: ONLINE (Healthy)` with successful HTTP 200 snapshot retrievals. Captured in `evidence/A10j/01_facts.txt`.
+- **STEP 2 — Code Truth Analysis**:
+  - Examined `scheduler.py::build_device_health_record`: evaluates `if not online or (now - fetched_dt) > timedelta(minutes=staleness_threshold_minutes):`. Freshness is bounded strictly by `online` flag and `fetched_at` poll time; `reported_at` is stored in the database but does not influence the freshness decision. Captured in `evidence/A10j/02_code_truth.txt`.
+- **STEP 3 — Ring Integration Notes Update**:
+  - Added "Finding 8: Stale reported_at Retention in Sandbox and Freshness Bound Behavior" to `docs/ring_integration_notes.md`. Formulated explicitly-labeled hypothesis that the sandbox environment caches the status from the last active session, and documented the pipeline consequence.
+- **STEP 4 — README Documentation**:
+  - Added Known Limitation 12 in `README.md` Section 9 (2 sentences max) documenting the freshness bound limitation with a pointer to Finding 8. Verified with `scripts/dev/check_readme.py` (exit 0). Captured in `evidence/A10j/03_check_readme.txt`.
+- **STEP 5 — Characterization Unit Test**:
+  - Added `test_limitation_build_device_health_record_ignores_stale_reported_at_when_fetched_at_fresh` in `tests/test_scheduler.py` characterizing current behavior where an old `reported_at` does not mark a record stale if `fetched_at` is fresh. Captured in `evidence/A10j/04_test_scheduler.txt`.
+
+#### 2. Verification Summary
+- **Evidence Files:** Saved under `evidence/A10j/` (`01_facts.txt` through `07_ci_clean_clone.txt`).
+- **Test Suite:** **292 tests passing** (291 baseline + 1 limitation characterization test).
+- **Clean Clone Validation:** All 4 CI commands pass cleanly in isolated clone under minimal environment.
+
