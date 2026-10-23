@@ -1616,3 +1616,24 @@ rt_morning_door|2026-10-12|2026-10-12T14:35:00Z||2026-10-12T14:35:00Z
 - **Test Suite:** **292 tests passing** (291 baseline + 1 limitation characterization test).
 - **Clean Clone Validation:** All 4 CI commands pass cleanly in isolated clone under minimal environment.
 
+### [2026-10-23T14:00:00Z] Task A12: README Presentation Refresh
+
+#### 1. Scope & Execution Overview
+- **Documentation Modernization (`README.md`)**:
+  - Restructured README for scannability and presentation while strictly preserving every factual claim, citation, and command.
+  - Added static shields.io badges (License MIT, Python 3.14, Dependencies: stdlib only) with zero external script or image tracking.
+  - Formatted core sections: 30-second quick-start command within top 30 lines, Table of Contents, 1-diagram architecture flowchart mapping strictly to modules inside `src/threshold/`, five derived statuses table, six demo scenes table with exact titles printed by `python3 -m src.threshold demo`, safety design bullet points, Ring Partner API usage table, real-vs-simulated table, and repository map.
+  - Maintained all 12 Known Limitations byte-for-byte identical, with exact platform sentence ("Tested on macOS with Python 3.14.7. Linux and Windows: not tested. Windows additionally needs `pip install tzdata` for Python `zoneinfo` support.").
+- **Automated Verification**:
+  - Ran `scripts/dev/check_readme.py`: all mechanical checks passed (top 30 lines, relative links, CLI commands, env vars matching `.env.example`, sample citations). Captured in `evidence/A12/01_checkers.txt`.
+  - Ran `scripts/dev/check_citations.py`: all 20 code symbols and 22 test citations verified. Captured in `evidence/A12/01_checkers.txt`.
+  - Ran `scripts/dev/check_redaction.py`: 96 tracked files scanned with 0 leaks. Captured in `evidence/A12/01_checkers.txt`.
+  - Verified claim diff: 0 unjustified claims, 0 new env vars, exactly 292 tests matching test suite. Captured in `evidence/A12/02_claim_diff.txt`.
+  - Verified limitations: 12/12 limitations byte-for-byte identical to HEAD. Captured in `evidence/A12/03_limitations_check.txt`.
+  - Verified Mermaid diagram: all 13 module paths verified existing on disk. Captured in `evidence/A12/04_mermaid_verify.txt`.
+
+#### 2. Verification Summary
+- **Evidence Files:** Saved under `evidence/A12/` (`01_checkers.txt` through `07_build_log_numstat.txt`).
+- **Test Suite:** **292 tests passing** in clean clone with minimal environment.
+- **Git State:** `README.md` and `docs/dev/BUILD_LOG.md` staged and committed; no push.
+

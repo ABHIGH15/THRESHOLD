@@ -1,9 +1,15 @@
 # Threshold
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python: 3.14](https://img.shields.io/badge/Python-3.14-blue.svg)](https://www.python.org/)
+[![Dependencies: stdlib only](https://img.shields.io/badge/Dependencies-stdlib%20only-green.svg)](https://docs.python.org/3/)
+
+> **Ring tells you when something happens. Threshold tells you when something doesn't.**
+
 Threshold is a state-aware pattern-absence detection system for remote caregivers monitoring elderly family members living alone. While Ring alerts you when motion occurs, Threshold monitors daily living routines and deterministically escalates when expected activity silently does not happen.
 
 ```bash
-# Try it in 60 seconds (zero secrets, zero network calls, no Ring account needed):
+# Try it in 30 seconds (zero secrets, zero network calls, no Ring account needed):
 python3 -m src.threshold demo
 ```
 
@@ -13,12 +19,26 @@ python3 -m src.threshold demo
 - **Image Snapshots (`POST /v1/devices/{id}/media/image/download`):** Fetches JPEG captures via two-step HTTP 303 redirect (verified live in sandbox).
 - **Webhook Ingestion (`POST /webhook`):** receiver implemented; verified only with locally signed POSTs, not Ring-delivered (the Playground cannot push webhooks).
 
-> **Scope Fence:** Threshold is a caregiver-support notification tool, not a medical or life-safety emergency device, and does not contact 911 or emergency services.
+> **Scope Fence:** Threshold is a caregiver-support notification tool, not a medical or life-safety emergency device, and does not contact 911 or emergency services.  
 > **Disclaimer:** Independent hackathon project. Not affiliated with, endorsed by, or sponsored by Ring or Amazon.
 
 ---
 
-## 1. What Threshold Is
+## Table of Contents
+- [1. Why Threshold (The Silence Problem)](#1-why-threshold-the-silence-problem)
+- [2. How It Works](#2-how-it-works)
+- [3. Demo Walkthrough: Six Deterministic Scenes](#3-demo-walkthrough-six-deterministic-scenes)
+- [4. Safety by Design](#4-safety-by-design)
+- [5. Ring Partner API Usage](#5-ring-partner-api-usage)
+- [6. REAL vs SIMULATED](#6-real-vs-simulated)
+- [7. Running for Real](#7-running-for-real)
+- [8. Tests & Verification](#8-tests--verification)
+- [9. Known Limitations](#9-known-limitations)
+- [10. Repository Map & Documentation](#10-repository-map--documentation)
+
+---
+
+## 1. Why Threshold (The Silence Problem)
 
 Ring's Shared Users feature lets a remote caregiver see camera motion feeds, but a continuous stream of events is the wrong interface for someone who isn't there. Caregivers need to know property **state**:
 1. Is Mom's morning routine proceeding normally?
@@ -34,52 +54,102 @@ Threshold bridges this gap:
 
 ---
 
-## 2. Try It in 60 Seconds
+## 2. How It Works
 
-The demo runs completely offline with zero configuration, zero credentials, and zero network calls using only Python's standard library and SQLite.
+### Architecture Flowchart
+Every node below maps directly to an implementation module inside `src/threshold/`:
 
-```bash
-python3 -m src.threshold demo
+```mermaid
+flowchart TD
+    subgraph Ingestion["1. Ingestion Layer"]
+        WH["src/threshold/server.py<br/>(Webhook Receiver & HMAC)"] -->|POST /webhook| INGEST["src/threshold/ingest.py<br/>(ingest_event)"]
+        POLL["src/threshold/ring_client.py<br/>(Ring API Poller)"] -->|poll_once()| INGEST
+    end
+
+    subgraph StateStore["2. Persistent Store"]
+        INGEST -->|Idempotent Write| DB[("src/threshold/store.py<br/>(SQLite Schema in WAL Mode)")]
+    end
+
+    subgraph AbsencePath["3. Absence Engine (Deterministic)"]
+        SCHED["src/threshold/scheduler.py<br/>(Scheduler.tick Loop)"] -->|Read Health & Events| DERIVE["src/threshold/status.py<br/>(derive_status)"]
+        DERIVE -->|watching to missed| ESCALATE{"Device Healthy & Fresh?"}
+        ESCALATE -->|Yes| FIRE["src/threshold/notifier.py<br/>(Fire-Once Escalation)"]
+        ESCALATE -->|No: Stale/Offline| UNK["Derive UNKNOWN<br/>(Silenced, 0 Alerts)"]
+    end
+
+    subgraph AgentBranch["4. Bounded Agent Branch (Off Absence Path)"]
+        AMBIG["src/threshold/agent/triggers.py<br/>(is_ambiguous_event)"] -->|Quiet Hours Trigger| AGENT["src/threshold/agent/investigate.py<br/>(run_investigation_and_gate)"]
+        TOOLS["src/threshold/agent/tools.py<br/>(5 Whitelisted Tools)"] -->|Diagnostic Results| AGENT
+        AGENT --> FACTS["src/threshold/agent/facts.py<br/>(build_gate_facts)"]
+        FACTS --> GATE{"src/threshold/agent/gate.py<br/>(Deterministic decide Gate)"}
+        GATE -->|"Cleared: ≥2 tools + cooldown"| ALERT["Caregiver Notification<br/>(CHECK NEEDED + Snapshot)"]
+        GATE -->|Not Cleared| SUPPRESS["Downgrade to check_needed<br/>(0 Alerts Sent)"]
+    end
+
+    subgraph Presentation["5. Presentation Layer"]
+        DB --> DASH["src/threshold/dashboard.py<br/>(Local Web Dashboard: http://127.0.0.1:8080)"]
+        FIRE --> CAREGIVER["Caregiver Telegram"]
+        ALERT --> CAREGIVER
+        CAREGIVER -->|Tap [False alarm]| CB["Callback Processing<br/>(src/threshold/notifier.py)"]
+        CB --> DB
+    end
 ```
+
+### The Five Derived Routine Statuses
+Threshold evaluates routine state on every tick via `src/threshold/status.py::derive_status`:
+
+| Status | Meaning | Absence Escalation? |
+|---|---|---|
+| `watching` | Active routine window or grace period; waiting for expected activity. | No (monitoring) |
+| `observed` | Expected motion detected during the window. Silently satisfied. | No (satisfied) |
+| `missed` | Window + grace passed with zero motion; device verified online and fresh. | **YES** (fires single escalation) |
+| `unknown` | Device offline, unreachable, or health poll stale (> 120m). Untrusted silence is not evidence. | No (silenced, 0 alerts) |
+| `snoozed` | Caregiver temporarily snoozed routine. | No (paused) |
+
+---
+
+## 3. Demo Walkthrough: Six Deterministic Scenes
+
+The offline demo runs through six complete operational scenarios using only the standard library and SQLite (`python3 -m src.threshold demo`).
+
 *Tested on macOS with Python 3.14.7. Linux and Windows: not tested. Windows additionally needs `pip install tzdata`.*
 
-### Real Demo Terminal Output (First 25 Lines)
-```text
-======================================================================================
-  THRESHOLD — PATTERN-ABSENCE DETECTION FOR ELDERLY CARE
-  'Ring tells you when something happens. Threshold tells you when something doesn't.'
-======================================================================================
-  Caregiver-support notification tool. Not an emergency or medical device.
-  Does not contact emergency services.
-  SIMULATED HOUSEHOLD (fictional) — Dallas, TX (America/Chicago)
-  All devices, events, routines, and clock times in this demo are simulated.
-  Device health polls:    SIMULATED (written with upsert_device_health, the function the real poller uses)
-  Stack: Python standard library only (no pip dependencies) + SQLite.
-  Zero network calls: all webhooks are signed and posted locally to 127.0.0.1.
---------------------------------------------------------------------------------------
-  Pre-roll:  Replayed Sat/Sun missed routines through scheduler.tick() + callback. Historical false alarms in DB: 2.
+| Scene | Printed Title | Operational Verification |
+|---|---|---|
+| **Scene 1** | `[SCENE 1: CALM MORNING] Routine Observed — Peace of Mind` | Morning movement detected at 07:42 CDT; status derives as `observed`; 09:31 deadline passes with 0 escalations. |
+| **Scene 2** | `[SCENE 2: TRUST BOUNDARY] Signature Check & Idempotent Ingestion` | Invalid HMAC rejected with HTTP 401 Unauthorized; duplicate POST ignored via database idempotency. |
+| **Scene 3** | `[SCENE 3: MISSED ROUTINE] The Silence — Deterministic Absence Escalation` | Evening check-in window and 30m grace expire in silence; status transitions to `missed`; exactly 1 escalation alert dispatched. |
+| **Scene 4** | `[SCENE 4: UNKNOWN NOT ALARM] Stale / Offline Device Silenced` | Device offline > 120m derives `UNKNOWN`; absence alert is silenced to prevent false panic. |
+| **Scene 5** | `[SCENE 5: CHECK NEEDED] Bounded Investigation & Gate Evaluation` | Quiet-hours motion at 02:10 CDT triggers bounded investigation; gate clears when $\ge 2$ tools succeed; 1 Check Needed message dispatched with evidence lines. |
+| **Scene 6** | `[SCENE 6: HOUSEHOLD MEMORY] Caretaker Resolution & Learned Safety` | Caregiver false-alarm callback recorded in SQLite; recurring quiet-hours motion queries household memory (3 past false alarms) and safely suppresses duplicate alert. |
 
-[SCENE 1: CALM MORNING] Routine Observed — Peace of Mind
-  Context:   Routine 'Morning movement' (07:00–09:00 CDT, +30m grace) on living room camera.
-  Action:    Resident steps into living room at 07:42 CDT. Signed motion webhook posted.
-  Result:    Event accepted (HTTP 200). Status derived: OBSERVED.
-  Tick:      Clock advances past deadline to 09:31 CDT. Scheduler tick: 0 escalations.
-
-[SCENE 2: TRUST BOUNDARY] Signature Check & Idempotent Ingestion
-  Test 2a:   POST event with invalid HMAC signature.
-  Result 2a: Rejected by server with HTTP 401 Unauthorized. Stored rows: 3 (unchanged).
-  Test 2b:   Send valid signed event twice with identical meta.request_id.
-  Result 2b: 1st POST HTTP 200 (events: 4). 2nd duplicate POST HTTP 200 (events: 4).
-```
-
-To run with an interactive web dashboard on loopback:
+To run the demo with an interactive web dashboard on loopback:
 ```bash
 python3 -m src.threshold demo --serve
 ```
 
 ---
 
-## 3. Ring Partner API Usage
+## 4. Safety by Design
+
+- **Unknown Not Alarm:** When a device health record is stale (> 120m) or offline, the absence engine derives `UNKNOWN`. It never assumes absence when sensor reachability is unverified (`tests.test_scheduler.TestSchedulerAbsenceEngine.test_offline_fresh_device_returns_unknown_zero_escalations_and_gate_checks_needed`).
+- **Deterministic Fire-Once with Reminders:** The scheduler monitors status transitions and fires exactly once on the `watching → missed` boundary per routine per day (`src/threshold/scheduler.py::Scheduler.tick`). Unacknowledged escalations trigger polite reminders on subsequent ticks (`tests.test_scheduler.TestSchedulerAbsenceEngine.test_five_consecutive_ticks_past_miss_exactly_one_escalation_row`).
+- **Safety Isolation (AST Import Guard):** The bounded agent runs strictly on anomalous motion events; the absence escalation path has zero model involvement. This architectural boundary is enforced by an automated AST import guard test (`tests.test_agent.TestAgentLibrary.test_ast_import_guard`).
+- **Five Whitelisted Diagnostic Tools (`src/threshold/agent/tools.py`):**
+  1. `get_recent_ring_events`: Retrieves event timestamps for context.
+  2. `pull_snapshot`: Downloads latest image capture via Ring Client.
+  3. `check_routine_status`: Queries routine windows and current state.
+  4. `get_threshold_history`: Retrieves historical threshold activity.
+  5. `check_household_memory`: Checks past false alarms and caretaker corrections.
+- **Deterministic Escalation Gate (`src/threshold/agent/gate.py::decide`):**
+  - **Evidence Bar:** Requires $\ge 2$ distinct successful tool executions (`tests.test_agent.TestAgentLibrary.test_gate_table_driven_all_conditions`).
+  - **Cooldown Bar:** The 30-minute notification cooldown (`src/threshold/agent/gate.py::decide`) is **household-wide** (not per-device). Per `src/threshold/agent/facts.py::build_gate_facts`, **ANY prior notification** counts—whether an absence escalation or an agent alert—by querying `MAX(notified_at)` across both tables (`tests.test_agent.TestAgentLibrary.test_build_gate_facts_cooldown_evaluates_latest_across_both_tables`).
+  - **Velocity Limit:** Maximum 2 agent escalations per 6 hours (`tests.test_agent.TestAgentLibrary.test_gate_table_driven_all_conditions`).
+  - **Delivery Hardening:** Over-limit (>1000 char) alerts send a photo with a short prefix caption followed by a full text message; `notified_at` is stamped only on confirmed delivery (`tests.test_agent.TestAgentLibrary.test_over_limit_delivery_combos_and_notified_at`).
+
+---
+
+## 5. Ring Partner API Usage
 
 All Ring Partner API interactions are implemented in `src/threshold/ring_client.py` and validated against the live Ring Developer Portal Playground (`api.amazonvision.com`).
 
@@ -99,7 +169,7 @@ All Ring Partner API interactions are implemented in `src/threshold/ring_client.
 
 ---
 
-## 4. REAL vs SIMULATED
+## 6. REAL vs SIMULATED
 
 Threshold explicitly separates production logic from simulated test scenarios:
 
@@ -126,87 +196,6 @@ Threshold explicitly separates production logic from simulated test scenarios:
 
 ---
 
-## 5. How It Works
-
-```mermaid
-flowchart TD
-    subgraph Ingestion["1. Ingestion Layer"]
-        WH["Ring Webhooks<br/>(HMAC-SHA256)"] -->|POST /webhook| INGEST["ingest_event()"]
-        POLL["Ring API Poller<br/>(devices/status/history)"] -->|poll_once()| INGEST
-    end
-
-    subgraph StateStore["2. Persistent Store"]
-        INGEST -->|Idempotent Write| DB[("SQLite Database<br/>events, device_health, routines")]
-    end
-
-    subgraph AbsencePath["3. Absence Engine (Deterministic)"]
-        SCHED["Scheduler Loop<br/>(every 60s)"] -->|Read State| DERIVE["derive_status()<br/>watching / observed / missed / unknown"]
-        DERIVE -->|watching → missed| ESCALATE{"Device Healthy?"}
-        ESCALATE -->|Yes| FIRE["Fire-Once Escalation<br/>(Telegram / Console)"]
-        ESCALATE -->|No: Stale/Offline| UNK["Derive UNKNOWN<br/>(Silenced, 0 Alerts)"]
-    end
-
-    subgraph AgentBranch["4. Bounded Agent Branch (Off Absence Path)"]
-        AMBIG["Ambiguous Event?<br/>(Quiet Hours / Unlinked)"] -->|Trigger| AGENT["Bounded Agent Loop<br/>(5 Whitelisted Tools)"]
-        AGENT -->|Tool Results| FACTS["Structured Facts<br/>(Evidence List)"]
-        FACTS --> GATE{"Deterministic Gate<br/>(Pure Function)"}
-        GATE -->|Cleared (≥2 tools + cooldown)| ALERT["Caregiver Alert<br/>(CHECK NEEDED + Snapshot)"]
-        GATE -->|Not Cleared| SUPPRESS["Downgrade / Silent"]
-    end
-
-    subgraph Presentation["5. Presentation Layer"]
-        DB --> DASH["Read-Only Dashboard<br/>(http://127.0.0.1:8080)"]
-        FIRE --> CAREGIVER["Caregiver Telegram"]
-        ALERT --> CAREGIVER
-        CAREGIVER -->|Tap [False Alarm]| CB["POST /callback<br/>(Household Memory)"]
-        CB --> DB
-    end
-```
-
-### Core Architecture Principles
-1. **Derived-Not-Stored Status:** Status is derived on every evaluation tick (`derive_status()`), never stored as mutable status columns. This prevents stuck state and forgotten resets.
-2. **Grace Semantics:** A routine with window `07:00–09:00` and delay `30m` evaluates as `watching` from `07:00` through `09:30`.
-3. **Deterministic Fire-Once:** The scheduler monitors status transitions and fires exactly once on the `watching → missed` boundary per routine per day. Unacknowledged escalations trigger polite reminders on subsequent ticks.
-4. **Safety Isolation (`UNKNOWN` Never Escalates):** When a device health record is stale or offline, the absence engine derives `UNKNOWN`. It never assumes absence when sensor reachability is unverified.
-5. **Agent Never Decides Absence:** The bounded agent runs strictly on anomalous motion events; the absence escalation path has zero model involvement.
-
----
-
-## 6. The Bounded-Authority Agent
-
-When unexpected motion occurs outside routine windows (e.g. 02:10 AM quiet hours), Threshold initiates an investigation.
-
-### What the Agent Can and Cannot Do
-- **CANNOT** create, suppress, or delay routine absence alerts.
-- **CANNOT** directly trigger phone calls or dispatch emergency services.
-- **CANNOT** inspect raw camera images (vision models are out of scope).
-- **CAN** invoke up to 5 strictly whitelisted tools within a 30-second budget:
-  1. `check_routine_status`: Queries routine windows and current state.
-  2. `query_device_health`: Checks online status and reported freshness.
-  3. `query_recent_events`: Retrieves event timestamps for context.
-  4. `check_household_memory`: Checks past false alarms and caretaker corrections.
-  5. `pull_snapshot`: Downloads latest image capture via Ring Client.
-
-### The Deterministic Escalation Gate (`src/threshold/agent/gate.py::decide`)
-Model recommendations are never trusted blindly. The final verdict is determined by a frozen, pure mathematical gate:
-- **Evidence Bar:** Requires $\ge 2$ distinct successful tool executions (`tests.test_agent.TestAgentLibrary.test_gate_table_driven_all_conditions`).
-- **Cooldown Bar:** The 30-minute notification cooldown (`src/threshold/agent/gate.py::decide`) is **household-wide** (not per-device). Per `src/threshold/agent/facts.py::build_gate_facts`, **ANY prior notification** counts—whether an absence escalation or an agent alert—by querying `MAX(notified_at)` across both tables:
-  ```sql
-  SELECT MAX(notified_at) FROM escalations WHERE notified_at IS NOT NULL
-  SELECT MAX(notified_at) FROM investigations WHERE notified_at IS NOT NULL
-  ```
-  *(This is distinct from the per-device investigation trigger deduplication in `src/threshold/agent/triggers.py::is_ambiguous_event`, which queries `SELECT 1 FROM investigations WHERE device_id = ? AND created_at >= ? LIMIT 1`).* Tested for household-wide multi-table evaluation in `tests.test_agent.TestAgentLibrary.test_build_gate_facts_cooldown_evaluates_latest_across_both_tables`, and for the 30-minute gate threshold in `tests.test_agent.TestAgentLibrary.test_gate_table_driven_all_conditions`.
-- **Velocity Limit:** Maximum 2 agent escalations per 6 hours (`tests.test_agent.TestAgentLibrary.test_gate_table_driven_all_conditions`).
-- **Delivery Hardening:** Over-limit (>1000 char) alerts send a photo with a short prefix caption followed by a full text message. If text delivery fails, it falls through to fallback text delivery, and `notified_at` is recorded in SQLite only on confirmed text delivery (`tests.test_agent.TestAgentLibrary.test_over_limit_delivery_combos_and_notified_at`).
-- If any check fails, the verdict is downgraded to `check_needed` without push alert.
-
-### Shipped Provider Modes
-- **Default Shipped Mode:** `mock` (`MockProvider`). Replays deterministic, committed scripted traces (`traces/*.json`) labeled `"replay (scripted)"` everywhere (`tests.test_agent.TestAgentLibrary.test_mock_provider_deterministic_replay`).
-- **Live LLM Providers:** No live cloud LLM is shipped by default. Provider stubs (`anthropic`, `openai`) exist in configuration validation but raise `ValueError("not implemented yet")`.
-- **Data Privacy:** In the default `mock` mode, **zero data leaves your machine**. All tool executions and traces operate locally (`tests.test_agent.TestAgentLibrary.test_mock_provider_deterministic_replay`).
-
----
-
 ## 7. Running for Real
 
 ### 1. Environment Configuration (`.env`)
@@ -223,11 +212,25 @@ Variables:
 - `TELEGRAM_CHAT_ID`: Caregiver Telegram chat ID (found via `scripts/telegram_whoami.py`).
 - `LLM_API_KEY`: Reserved for optional live provider.
 
-### 2. Live API Health Check
-Test Ring API connectivity and token validity:
-```bash
-python3 -m src.threshold ring-check
-```
+### 2. Live Diagnostic & Path Checks
+- **Ring Partner API Diagnostic:** Validate token, devices, health, and recent event history:
+  ```bash
+  python3 -m src.threshold ring-check
+  ```
+- **Optional Live Photo Path Check:** Test real Ring snapshot retrieval and Telegram delivery:
+  ```bash
+  # Offline dry-run verification:
+  python3 scripts/live_photo_check.py --dry-run
+
+  # Live snapshot retrieval and Telegram delivery (path test, not an absence event):
+  python3 scripts/live_photo_check.py --send
+  ```
+  `--long` pads the message with synthetic filler to exercise the over-limit branch; it contains no real evidence.
+- **Test Alert Dispatch:** Send an immediate test escalation alert to Telegram or Console:
+  ```bash
+  python3 -m src.threshold test-alert
+  ```
+  *Note: Telegram buttons (`False alarm`, `Got it`) are implemented and covered by automated tests (`tests/test_notifier.py`); live callback processing on your phone requires the background daemon to be running.*
 
 ### 3. CLI Subcommands
 Copied verbatim from `python3 -m src.threshold --help`:
@@ -262,29 +265,30 @@ Run Threshold in poller mode with embedded dashboard:
 python3 -m src.threshold run --config threshold.example.json --db threshold.db
 ```
 
-### 5. Optional Live Photo Path Check
-Prove the real Ring snapshot retrieval to Telegram photo delivery path by hand:
-```bash
-# Offline dry-run verification (placeholder JPEG, character counts, and HTML validation):
-python3 scripts/live_photo_check.py --dry-run
-
-# Live Ring snapshot retrieval and Telegram photo delivery (requires credentials in .env):
-python3 scripts/live_photo_check.py --send
-```
-
-`--long` pads the message with synthetic filler to exercise the over-limit branch; it contains no real evidence.
-
 ---
 
-## 8. Test Suite
+## 8. Tests & Verification
 
-Threshold includes 287 unit and integration tests requiring no external network connectivity:
+Threshold includes 292 unit and integration tests requiring no external network connectivity:
 ```bash
 python3 -m unittest discover -s tests -v
 ```
-- **Test Count:** 287 tests.
+- **Test Count:** 292 tests.
 - **Runtime:** ~50 seconds.
 - **Network Requirements:** Loopback sockets only (`127.0.0.1`); zero external requests.
+
+### Mechanical Integrity Checkers
+The repository includes three automated verification checkers:
+```bash
+# Verify relative links, CLI subcommands, top-30 lines, and env vars:
+python3 scripts/dev/check_readme.py
+
+# Verify AST code symbols and test citations in documentation:
+python3 scripts/dev/check_citations.py
+
+# Verify zero secrets or unredacted tokens across git-tracked files:
+python3 scripts/dev/check_redaction.py
+```
 
 ---
 
@@ -306,7 +310,26 @@ In the interest of complete engineering honesty:
 
 ---
 
-## 10. Documentation & Links
+## 10. Repository Map & Documentation
+
+```text
+Threshold/
+├── README.md                      # Complete project documentation & quickstart
+├── LICENSE                        # MIT License (Copyright 2026 Amit Kumar Gupta)
+├── threshold.example.json         # Declarative configuration template
+├── .env.example                   # Environment variable template
+├── docs/
+│   ├── ring_integration_notes.md  # Primary-source friction log & 8 API findings
+│   ├── DEMO_VIDEO_SCRIPT.md       # Scene-by-scene video script & talking points
+│   ├── sample_investigation.json  # Sanitized agent investigation trace
+│   ├── dev/
+│   │   ├── BUILD_LOG.md           # Verbatim engineering log (A1 through A12)
+│   │   └── threshold_spec.md      # Foundational system architecture spec
+│   └── ring_samples/              # Redacted raw JSON API responses from sandbox
+├── src/threshold/                 # Production core: ring_client, scheduler, status, etc.
+├── scripts/                       # Diagnostics, live photo check, and dev checkers
+└── tests/                         # 292 unit, integration, and platform tests
+```
 
 - **Integration Notes & Friction Log:** [docs/ring_integration_notes.md](docs/ring_integration_notes.md)
 - **Sample Agent Investigation JSON:** [docs/sample_investigation.json](docs/sample_investigation.json)
