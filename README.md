@@ -63,7 +63,7 @@ Every node below maps directly to an implementation module inside `src/threshold
 flowchart TD
     subgraph Ingestion["1. Ingestion Layer"]
         WH["src/threshold/server.py<br/>(Webhook Receiver & HMAC)"] -->|POST /webhook| INGEST["src/threshold/ingest.py<br/>(ingest_event)"]
-        POLL["src/threshold/ring_client.py<br/>(Ring API Poller)"] -->|poll_once()| INGEST
+        POLL["src/threshold/ring_client.py<br/>(Ring API Poller)"] -->|"poll_once()"| INGEST
     end
 
     subgraph StateStore["2. Persistent Store"]
@@ -90,7 +90,7 @@ flowchart TD
         DB --> DASH["src/threshold/dashboard.py<br/>(Local Web Dashboard: http://127.0.0.1:8080)"]
         FIRE --> CAREGIVER["Caregiver Telegram"]
         ALERT --> CAREGIVER
-        CAREGIVER -->|Tap [False alarm]| CB["Callback Processing<br/>(src/threshold/notifier.py)"]
+        CAREGIVER -->|"Tap [False alarm]"| CB["Callback Processing<br/>(src/threshold/notifier.py)"]
         CB --> DB
     end
 ```
